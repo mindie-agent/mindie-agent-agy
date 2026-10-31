@@ -463,7 +463,7 @@ def handle_rpc(request: dict, surface: str, *, config=None, receipts: RemoteRece
             result=dict(
                 protocolVersion=params.get("protocolVersion") or "2024-11-05",
                 capabilities=dict(tools=dict(listChanged=False)),
-                serverInfo=dict(name=f"mindie-agy-{surface}", version="0.1.0"),
+                serverInfo=dict(name=f"mindie-agy-{surface}", version="0.1.1"),
             ),
         )
     if method == "tools/list":
