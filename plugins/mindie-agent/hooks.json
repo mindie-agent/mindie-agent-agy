@@ -1,0 +1,37 @@
+{
+  "mindie-agent": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "python ./scripts/mindie_launch.py hook session-start",
+        "timeout": 15
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "python ./scripts/mindie_launch.py hook pre-invocation",
+        "timeout": 15
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "mcp_mindie.*|call_mcp_tool",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ./scripts/mindie_launch.py hook pre-tool-use",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python ./scripts/mindie_launch.py hook stop",
+        "timeout": 15
+      }
+    ]
+  }
+}
