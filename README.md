@@ -91,9 +91,9 @@ MindIE Agent 采用**「领域知识与 Skill 手动按需触发 + 远端开发�
 1. **检查基础工具与 `gh` GitHub 交互通道（硬性指标）**：
    **稳定的 GitHub 交互通道（已安装并登录 `gh` CLI）是硬性前置指标**——插件拉取、`knowledge-vllm-ascend` 同步、经验闭环自动提交 PR 及组件故障上报均依赖该通道：
    ```sh
-   git --version
-   uv --version
-   gh --version
+   git --version && uv --version && gh --version
+   git config --global core.longpaths true && git config --global core.autocrlf false
+   git config --global credential.https://github.com.provider github
    GH_USER=$(gh api --hostname github.com user --jq .login) && echo "GitHub channel verified for account: $GH_USER"
    gh auth setup-git --hostname github.com
    ```
@@ -102,26 +102,29 @@ MindIE Agent 采用**「领域知识与 Skill 手动按需触发 + 远端开发�
 2. **克隆 `mindie-agent-agy` 并将原生插件包安装到用户全局或当前工作区插件目录**：
    - **工作区级安装**（推荐用于项目隔离，挂载到 `<workspace>/.agents/plugins/mindie-agent`）：
      ```sh
-     git clone https://github.com/mindie-agent/mindie-agent-agy.git
-     mkdir -p .agents/plugins
-     cp -R mindie-agent-agy/plugins/mindie-agent .agents/plugins/mindie-agent
+     git -c core.autocrlf=false -c core.longpaths=true clone https://github.com/mindie-agent/mindie-agent-agy.git
+     mkdir -p .agents/plugins/mindie-agent
+     cp -R mindie-agent-agy/plugins/mindie-agent/. .agents/plugins/mindie-agent/
      ```
-   - **用户全局安装**（挂载到 `~/.gemini/plugins/mindie-agent`）：
+   - **用户全局安装**（同时挂载到 Antigravity 2.0 全局发现目录 `~/.gemini/config/plugins/mindie-agent` 与 `~/.gemini/plugins/mindie-agent`）：
      ```sh
-     git clone https://github.com/mindie-agent/mindie-agent-agy.git
-     mkdir -p ~/.gemini/plugins
-     cp -R mindie-agent-agy/plugins/mindie-agent ~/.gemini/plugins/mindie-agent
+     git -c core.autocrlf=false -c core.longpaths=true clone https://github.com/mindie-agent/mindie-agent-agy.git
+     mkdir -p ~/.gemini/config/plugins/mindie-agent ~/.gemini/plugins/mindie-agent
+     cp -R mindie-agent-agy/plugins/mindie-agent/. ~/.gemini/config/plugins/mindie-agent/
+     cp -R mindie-agent-agy/plugins/mindie-agent/. ~/.gemini/plugins/mindie-agent/
      ```
 
-3. **初始化适配器默认 Profile（被动静默模式，不自动启动知识守护进程）**：
+3. **一键自举运行时环境并初始化适配器默认 Profile（被动静默模式，自动注入企业代理系统证书与 Windows 长路径配置）**：
    ```sh
-   python .agents/plugins/mindie-agent/scripts/setup.py init --workspace-root "$PWD"
+   UV_SYSTEM_CERTS=true UV_NATIVE_TLS=true uv run --no-project --python 3.13 python ~/.gemini/config/plugins/mindie-agent/scripts/setup.py init --workspace-root "$PWD"
    ```
+   *(若采用工作区级安装，将脚本路径替换为 `.agents/plugins/mindie-agent/scripts/setup.py`)*
 
 4. **核对插件安装与契约测试**：
    ```sh
-   pytest mindie-agent-agy/tests -q
+   ~/.local/share/mindie-agent/agy-venv/bin/python -m pytest mindie-agent-agy/tests -q
    ```
+   *(Windows 下解释器路径为 `~/.local/share/mindie-agent/agy-venv/Scripts/python.exe`)*
    - 向用户汇报已验证的 GitHub 账号（`$GH_USER`）、插件挂载路径以及默认 Profile（`~/.config/mindie-agent/agy.json`）初始化状态。
    - 随后介绍 [用户须知](plugins/mindie-agent/skills/mindie-agent/references/user-notice.md) 与 [工作区配置指南](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md)，并提示用户输入 **`/mindie-agent 帮我完成首次配置`** 即可启用领域知识与 Skill 引导。
 

@@ -135,3 +135,38 @@ def test_flexible_component_update_baseline_and_atomic_rebind(tmp_path, monkeypa
     assert Path(rebound["python"]).resolve() == fake_py.resolve()
     assert rebound["component_runtime"]["runtime"]["mindie-knowledge"]["version"] == "0.13.99"
 
+
+def test_enterprise_transport_env_and_staged_source_baseline(tmp_path, monkeypatch):
+    import paths
+    import setup
+
+    env = paths.apply_enterprise_transport_env({})
+    assert env["UV_SYSTEM_CERTS"] == "true"
+    assert env["UV_NATIVE_TLS"] == "true"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["GCM_INTERACTIVE"] == "never"
+    assert env["GIT_CONFIG_COUNT"] == "3"
+    assert env["GIT_CONFIG_KEY_0"] == "core.longpaths"
+    assert env["GIT_CONFIG_VALUE_0"] == "true"
+    assert env["GIT_CONFIG_KEY_1"] == "core.autocrlf"
+    assert env["GIT_CONFIG_VALUE_1"] == "false"
+
+    crlf_src = tmp_path / "crlf-src"
+    crlf_src.mkdir()
+    for name in ("pyproject.toml", "product-contract.json", "harness-compatibility.json"):
+        raw = (REPO_ROOT / name).read_bytes().replace(b"\n", b"\r\n")
+        (crlf_src / name).write_bytes(raw)
+    staged_dst = tmp_path / "data" / "agy-source"
+    result_dir = setup.stage_source_baseline(crlf_src, staged_dst)
+    assert result_dir == staged_dst.resolve()
+    for name in ("pyproject.toml", "product-contract.json", "harness-compatibility.json"):
+        assert b"\r\n" not in (staged_dst / name).read_bytes()
+
+    mounted_plugin = tmp_path / "gemini" / "config" / "plugins" / "mindie-agent"
+    mounted_plugin.mkdir(parents=True)
+    monkeypatch.setenv("AGY_PLUGIN_ROOT", str(mounted_plugin))
+    monkeypatch.setenv("MINDIE_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("MINDIE_CONFIG_HOME", str(tmp_path / "config"))
+    assert paths.repo_root() == staged_dst.resolve()
+
+

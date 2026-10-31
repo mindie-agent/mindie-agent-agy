@@ -43,6 +43,7 @@ import uuid
 
 from admission import status_facts
 from bounded import run as bounded_run
+from component_update import trigger_background_update_if_due
 from identity import claim_bind, finish_bind
 from paths import config_path, read_json, remote_receipts_path
 
@@ -470,6 +471,7 @@ def handle_rpc(request: dict, surface: str, *, config=None, receipts: RemoteRece
         tools = remote_catalog() if surface == "remote" else tools_catalog()
         return dict(jsonrpc="2.0", id=req_id, result=dict(tools=tools))
     if method == "tools/call":
+        trigger_background_update_if_due(config=config)
         name = params.get("name")
         arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
         if not isinstance(name, str) or not name:

@@ -34,6 +34,7 @@ import sys
 
 from admission import activate, deactivate, knowledge_lease, status_facts
 from agy_transcript import capture_source
+from component_update import trigger_background_update_if_due
 from identity import (
     parse_agy_mcp_tool,
     parse_hook,
@@ -66,6 +67,7 @@ def _read_stdin_event() -> dict:
 def handle_session_start(event: dict | None = None, *, config=None) -> dict:
     """`SessionStart` hook: passive by default; never activates a knowledge lease."""
     event = _read_stdin_event() if event is None else event
+    trigger_background_update_if_due(config=config)
     try:
         session = session_from_hook(event)
     except ValueError:
