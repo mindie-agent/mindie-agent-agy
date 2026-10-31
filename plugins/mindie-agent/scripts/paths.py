@@ -37,8 +37,51 @@ def plugin_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def repo_root() -> Path:
-    return plugin_root().parent.parent
+def repo_root(config: str | Path | None = None) -> Path:
+    explicit = os.environ.get("MINDIE_AGY_SOURCE_ROOT")
+    if explicit and os.path.isabs(explicit):
+        ep = Path(explicit).resolve()
+        if (ep / "pyproject.toml").is_file():
+            return ep
+    candidate = plugin_root().parent.parent
+    if (candidate / "pyproject.toml").is_file():
+        return candidate
+    cfg = config_path(config)
+    if cfg.is_file():
+        try:
+            data = read_json(cfg)
+            sr = data.get("source_root")
+            if isinstance(sr, str) and os.path.isabs(sr) and (Path(sr) / "pyproject.toml").is_file():
+                return Path(sr).resolve()
+        except ValueError:
+            pass
+    retained = data_home() / "agy-source"
+    if (retained / "pyproject.toml").is_file():
+        return retained
+    return candidate
+
+
+def apply_enterprise_transport_env(target_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Configure enterprise TLS trust, non-interactive GCM fast-path, and Windows Git longpaths/LF."""
+    env = os.environ if target_env is None else target_env
+    env.setdefault("UV_SYSTEM_CERTS", "true")
+    env.setdefault("UV_NATIVE_TLS", "true")
+    env.setdefault("UV_NO_PROGRESS", "1")
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    env.setdefault("GCM_INTERACTIVE", "never")
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    if "GIT_CONFIG_COUNT" not in env:
+        git_pairs = (
+            ("core.longpaths", "true"),
+            ("core.autocrlf", "false"),
+            ("credential.https://github.com.provider", "github"),
+        )
+        env["GIT_CONFIG_COUNT"] = str(len(git_pairs))
+        for idx, (k, v) in enumerate(git_pairs):
+            env[f"GIT_CONFIG_KEY_{idx}"] = k
+            env[f"GIT_CONFIG_VALUE_{idx}"] = v
+    return dict(env)
 
 
 def config_home() -> Path:

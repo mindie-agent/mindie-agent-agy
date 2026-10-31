@@ -91,9 +91,9 @@ If you are an AI Agent asked by the user to install this plugin, execute the fol
 1. **Check prerequisites and the `gh` GitHub channel (Hard Requirement)**:
    **A stable, authenticated GitHub CLI (`gh`) channel is a hard requirement**—it powers plugin fetches, `knowledge-vllm-ascend` sync, automated PR publication, and opt-in fault reporting:
    ```sh
-   git --version
-   uv --version
-   gh --version
+   git --version && uv --version && gh --version
+   git config --global core.longpaths true && git config --global core.autocrlf false
+   git config --global credential.https://github.com.provider github
    GH_USER=$(gh api --hostname github.com user --jq .login) && echo "GitHub channel verified for account: $GH_USER"
    gh auth setup-git --hostname github.com
    ```
@@ -102,26 +102,29 @@ If you are an AI Agent asked by the user to install this plugin, execute the fol
 2. **Clone `mindie-agent-agy` and install the native plugin bundle into the workspace or user plugin directory**:
    - **Workspace installation** (recommended, mounted at `<workspace>/.agents/plugins/mindie-agent`):
      ```sh
-     git clone https://github.com/mindie-agent/mindie-agent-agy.git
-     mkdir -p .agents/plugins
-     cp -R mindie-agent-agy/plugins/mindie-agent .agents/plugins/mindie-agent
+     git -c core.autocrlf=false -c core.longpaths=true clone https://github.com/mindie-agent/mindie-agent-agy.git
+     mkdir -p .agents/plugins/mindie-agent
+     cp -R mindie-agent-agy/plugins/mindie-agent/. .agents/plugins/mindie-agent/
      ```
-   - **User-global installation** (mounted at `~/.gemini/plugins/mindie-agent`):
+   - **User-global installation** (mounted at both Antigravity 2.0 global discovery root `~/.gemini/config/plugins/mindie-agent` and `~/.gemini/plugins/mindie-agent`):
      ```sh
-     git clone https://github.com/mindie-agent/mindie-agent-agy.git
-     mkdir -p ~/.gemini/plugins
-     cp -R mindie-agent-agy/plugins/mindie-agent ~/.gemini/plugins/mindie-agent
+     git -c core.autocrlf=false -c core.longpaths=true clone https://github.com/mindie-agent/mindie-agent-agy.git
+     mkdir -p ~/.gemini/config/plugins/mindie-agent ~/.gemini/plugins/mindie-agent
+     cp -R mindie-agent-agy/plugins/mindie-agent/. ~/.gemini/config/plugins/mindie-agent/
+     cp -R mindie-agent-agy/plugins/mindie-agent/. ~/.gemini/plugins/mindie-agent/
      ```
 
-3. **Initialize the default adapter profile (passive default, does not start background services)**:
+3. **Bootstrap the component runtime and initialize the default adapter profile (passive default, with enterprise proxy system TLS and Windows longpath settings)**:
    ```sh
-   python .agents/plugins/mindie-agent/scripts/setup.py init --workspace-root "$PWD"
+   UV_SYSTEM_CERTS=true UV_NATIVE_TLS=true uv run --no-project --python 3.13 python ~/.gemini/config/plugins/mindie-agent/scripts/setup.py init --workspace-root "$PWD"
    ```
+   *(For workspace installation, replace the script path with `.agents/plugins/mindie-agent/scripts/setup.py`)*
 
 4. **Verify plugin installation and contract tests**:
    ```sh
-   pytest mindie-agent-agy/tests -q
+   ~/.local/share/mindie-agent/agy-venv/bin/python -m pytest mindie-agent-agy/tests -q
    ```
+   *(On Windows, the interpreter is `~/.local/share/mindie-agent/agy-venv/Scripts/python.exe`)*
    - Report the verified GitHub account (`$GH_USER`), plugin mount path, and initialized profile (`~/.config/mindie-agent/agy.json`), then present the [Contribution Notice](plugins/mindie-agent/skills/mindie-agent/references/user-notice.md) and [Workspace Setup](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md), and let the user know they can type **`/mindie-agent help me finish first-time setup`** to activate the session lease.
 
 </details>

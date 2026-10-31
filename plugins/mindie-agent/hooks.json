@@ -3,14 +3,14 @@
     "SessionStart": [
       {
         "type": "command",
-        "command": "python ./scripts/mindie_launch.py hook session-start",
+        "command": "uv run --no-project --python 3.13 python -B ./scripts/mindie_launch.py hook session-start",
         "timeout": 15
       }
     ],
     "PreInvocation": [
       {
         "type": "command",
-        "command": "python ./scripts/mindie_launch.py hook pre-invocation",
+        "command": "uv run --no-project --python 3.13 python -B ./scripts/mindie_launch.py hook pre-invocation",
         "timeout": 15
       }
     ],
@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python ./scripts/mindie_launch.py hook pre-tool-use",
+            "command": "uv run --no-project --python 3.13 python -B ./scripts/mindie_launch.py hook pre-tool-use",
             "timeout": 10
           }
         ]
@@ -29,7 +29,7 @@
     "Stop": [
       {
         "type": "command",
-        "command": "python ./scripts/mindie_launch.py hook stop",
+        "command": "uv run --no-project --python 3.13 python -B ./scripts/mindie_launch.py hook stop",
         "timeout": 15
       }
     ]

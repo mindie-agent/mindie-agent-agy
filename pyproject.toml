@@ -19,6 +19,7 @@ components = [
     "mindie-coordinator>=0.6.0",
     "mindie-profiler>=0.5.0",
     "mindie-sim>=0.7.0",
+    "npu-top>=0.3.0",
 ]
 test = [
     "pytest>=8,<10",
@@ -32,8 +33,13 @@ mindie-diagnostics = { git = "https://github.com/mindie-agent/diagnostics", rev 
 
 [tool.uv]
 override-dependencies = [
-    "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@5ae643e19223f2181ecdbaa3edaf464137c4805e",
+    "mindie-knowledge @ git+https://github.com/mindie-agent/knowledge@9a4325858e6fadb10715275826a7795843cbbdf4",
     "remote-dev @ git+https://github.com/mindie-agent/remote-dev@85be999811771e03ecc7d78e5e560fac1636e7ef",
+    "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@5ae643e19223f2181ecdbaa3edaf464137c4805e",
+    "mindie-coordinator @ git+https://github.com/mindie-agent/coordinator@d146c55c414bfb92136cf5fb7fa11ae14c673ef0",
+    "mindie-profiler @ git+https://github.com/mindie-agent/profiler@22ed2cadff6656c0b26be8cc77ea2bf48a1c0d21",
+    "mindie-sim @ git+https://github.com/mindie-agent/sim@f842e7c0ebbfabae836534152af39665419e7908",
+    "npu-top @ git+https://github.com/mindie-agent/npu-top@ff78215dbe94bb3bd16abc6897878918748b8aee",
 ]
 
 [tool.pytest.ini_options]

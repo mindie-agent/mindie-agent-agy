@@ -1,10 +1,10 @@
-"""MindIE Agent profile provisioner and configuration manager for Antigravity (`setup.py`).
+"""MindIE Agent profile provisioner and runtime bootstrapper for Antigravity (`setup.py`).
 
 [Role]
 Initializes and updates the MindIE-owned Antigravity adapter profile (`agy.json`,
-`agy.engine.json`, `mindie-community.json`, `mindie-consent.json`), validating
-`product-contract.json` and `harness-compatibility.json` without starting the
-knowledge service or syncing feeds during installation.
+`agy.engine.json`, `mindie-community.json`, `mindie-consent.json`), bootstrapping
+the persistent component virtualenv (`agy-venv`) and LF-normalized source baseline
+(`agy-source`) when invoked from a bare Python interpreter.
 
 [Invariants]
 - Passive Default: `ensure_default_profile` and `configure_community` write
@@ -13,37 +13,165 @@ knowledge service or syncing feeds during installation.
 - Never writes into `~/.gemini`.
 
 [Timeouts & Locks]
-- Pure local file validation and atomic `os.replace()` writes; no network calls.
+- Local config validation/writes are immediate; first-time `uv sync` runtime
+  bootstrap is bounded by `BOOTSTRAP_TIMEOUT = 540.0s`.
 
 [Side-Effect Policy]
 - Writes `agy.json`, `agy.engine.json`, `mindie-community.json`, and
-  `mindie-consent.json` under `config_home()`.
+  `mindie-consent.json` under `config_home()`, and stages `agy-source` /
+  `agy-venv` under `data_home()` when bootstrapping.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
-import time
+import tempfile
 
-from mindie_knowledge import consent_store
-from mindie_knowledge.loop import settings as settings_mod
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 
+from bounded import run as bounded_run
 from paths import (
     admission_path,
+    apply_enterprise_transport_env,
     atomic_write_json,
     community_config_path,
     config_path,
     consent_path,
     data_home,
     engine_config_path,
+    plugin_root,
     read_json,
     repo_root,
     state_dir,
 )
+
+BOOTSTRAP_TIMEOUT = 540.0
+_TEXT_SUFFIXES = {".py", ".json", ".md", ".toml", ".svg", ".txt", ".yml", ".yaml"}
+_BASELINE_ITEMS = (
+    "pyproject.toml",
+    "product-contract.json",
+    "harness-compatibility.json",
+    "plugins",
+)
+
+
+def _discover_checkout_source() -> Path | None:
+    """Locate a complete `mindie-agent-agy` checkout for source baseline retention."""
+    candidates = [
+        plugin_root().parent.parent,
+        repo_root(),
+        Path(os.environ.get("TMPDIR") or tempfile.gettempdir()) / "mindie-agent-agy-install",
+        Path("/tmp/mindie-agent-agy-install"),
+        data_home() / "agy-source",
+    ]
+    for cand in candidates:
+        try:
+            resolved = cand.resolve()
+        except OSError:
+            continue
+        if (resolved / "pyproject.toml").is_file() and (resolved / "product-contract.json").is_file():
+            return resolved
+    return None
+
+
+def _copy_lf_clean(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    raw = src.read_bytes()
+    if src.suffix in _TEXT_SUFFIXES and b"\r\n" in raw:
+        raw = raw.replace(b"\r\n", b"\n")
+    dst.write_bytes(raw)
+
+
+def stage_source_baseline(source_dir: str | Path | None = None, dest_dir: str | Path | None = None) -> Path:
+    """Persist an LF-normalized adapter source baseline under `data_home()/agy-source`."""
+    src = Path(source_dir).resolve() if source_dir is not None else _discover_checkout_source()
+    dst = Path(dest_dir).resolve() if dest_dir is not None else (data_home() / "agy-source").resolve()
+    if src is None:
+        return dst if (dst / "pyproject.toml").is_file() else repo_root()
+    if src == dst:
+        for fpath in dst.rglob("*"):
+            if fpath.is_file() and fpath.suffix in _TEXT_SUFFIXES and ".git" not in fpath.parts:
+                raw = fpath.read_bytes()
+                if b"\r\n" in raw:
+                    fpath.write_bytes(raw.replace(b"\r\n", b"\n"))
+        return dst
+
+    dst.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for item_name in _BASELINE_ITEMS:
+        item_src = src / item_name
+        if not item_src.exists():
+            continue
+        item_dst = dst / item_name
+        if item_src.is_file():
+            _copy_lf_clean(item_src, item_dst)
+        else:
+            for sub in item_src.rglob("*"):
+                if any(part in {"__pycache__", ".pytest_cache", ".git", ".venv"} for part in sub.parts):
+                    continue
+                if sub.is_file() and sub.suffix != ".pyc":
+                    _copy_lf_clean(sub, item_dst / sub.relative_to(item_src))
+    return dst
+
+
+def ensure_runtime_python(
+    source_root: str | Path | None = None,
+    python_exe: str | None = None,
+    *,
+    timeout: float = BOOTSTRAP_TIMEOUT,
+) -> str:
+    """Return an interpreter with MindIE runtime components installed, bootstrapping `agy-venv` if needed."""
+    if python_exe:
+        return str(Path(python_exe).resolve())
+    if importlib.util.find_spec("mindie_knowledge") is not None:
+        return str(Path(sys.executable).resolve())
+
+    venv_dir = data_home() / "agy-venv"
+    venv_py = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    src_root = stage_source_baseline(source_root)
+    if venv_py.is_file():
+        probe = bounded_run(
+            [str(venv_py), "-I", "-c", "import mindie_knowledge, remote_dev, mindie_diagnostics"],
+            "",
+            timeout=15.0,
+        )
+        if probe.returncode == 0:
+            return str(venv_py.resolve())
+
+    uv = shutil.which("uv")
+    if uv is None:
+        raise RuntimeError("uv is required to bootstrap the MindIE Antigravity runtime")
+
+    env = apply_enterprise_transport_env(dict(os.environ))
+    env["UV_PROJECT_ENVIRONMENT"] = str(venv_dir)
+    proc = bounded_run(
+        [
+            uv,
+            "sync",
+            "--project",
+            str(src_root),
+            "--all-extras",
+            "--no-dev",
+            "--python",
+            "3.13",
+        ],
+        "",
+        timeout=timeout,
+        max_output=256 * 1024,
+        env=env,
+    )
+    if proc.returncode != 0 or not venv_py.is_file():
+        detail = (proc.stderr or proc.stdout or "").strip()[-1000:]
+        raise RuntimeError(f"uv sync failed while bootstrapping agy-venv (exit {proc.returncode}): {detail}")
+    return str(venv_py.resolve())
 
 
 def validate_contracts() -> dict:
@@ -67,16 +195,26 @@ def ensure_default_profile(
     domain: str = "vllm-ascend",
     python_exe: str | None = None,
 ) -> dict:
+    apply_enterprise_transport_env()
+    interpreter = ensure_runtime_python(python_exe=python_exe)
+
+    from mindie_knowledge.loop import settings as settings_mod
+
     cfg_file = config_path(config)
     eng_file = engine_config_path(cfg_file)
     sdir = state_dir(cfg_file)
     adm_file = admission_path(cfg_file)
     comm_file = community_config_path(cfg_file)
     scripts_dir = Path(__file__).resolve().parent
-    interpreter = str(Path(python_exe or sys.executable).resolve())
     data_root = data_home() / "domains" / domain
     sdir.mkdir(mode=0o700, parents=True, exist_ok=True)
     data_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    direct_root = plugin_root().parent.parent
+    if not (direct_root / "pyproject.toml").is_file() or "mindie-agent-agy-install" in str(direct_root):
+        resolved_source = stage_source_baseline()
+    else:
+        resolved_source = repo_root(cfg_file)
 
     validation = validate_contracts()
     gitleaks = shutil.which("gitleaks")
@@ -110,6 +248,7 @@ def ensure_default_profile(
         harness="antigravity",
         python=interpreter,
         runtime_scripts=str(scripts_dir),
+        source_root=str(resolved_source),
         engine_config=str(eng_file),
         state_dir=str(sdir),
         admission_path=str(adm_file),
@@ -147,6 +286,9 @@ def configure_community(
     visibility: str = "public",
     repository: str = "mindie-agent/knowledge-vllm-ascend",
 ) -> dict:
+    from mindie_knowledge import consent_store
+    from mindie_knowledge.loop import settings as settings_mod
+
     cfg_file = config_path(config)
     if not cfg_file.is_file():
         ensure_default_profile(config=cfg_file, workspace_root=project_root)
@@ -185,6 +327,22 @@ def configure_community(
 
 
 def main(argv: list[str] | None = None) -> int:
+    apply_enterprise_transport_env()
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if not raw_argv:
+        raw_argv = ["init"]
+    if (
+        importlib.util.find_spec("mindie_knowledge") is None
+        and os.environ.get("_MINDIE_AGY_SETUP_BOOTSTRAPPED") != "1"
+    ):
+        staged_src = stage_source_baseline()
+        target_py = ensure_runtime_python(staged_src)
+        env = apply_enterprise_transport_env(dict(os.environ))
+        env["_MINDIE_AGY_SETUP_BOOTSTRAPPED"] = "1"
+        env["MINDIE_AGY_SOURCE_ROOT"] = str(staged_src)
+        proc = subprocess.run([target_py, "-I", str(Path(__file__).resolve()), *raw_argv], env=env)
+        return int(proc.returncode)
+
     parser = argparse.ArgumentParser(description="Configure MindIE Agent for Antigravity")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -202,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
     share_p.add_argument("--remote-project-root", default=None)
     share_p.add_argument("--visibility", default="public")
 
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     if args.cmd == "init":
         result = ensure_default_profile(
             config=args.config,

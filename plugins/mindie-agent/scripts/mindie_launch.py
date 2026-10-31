@@ -29,7 +29,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from paths import config_path, read_json
+from paths import apply_enterprise_transport_env, config_path, data_home, read_json
 
 HOOK_TOTAL = 10.0
 HOOK_LOCK_BUDGET = 2.0
@@ -45,6 +45,10 @@ def _preferred_python() -> str | None:
                 return str(Path(py).resolve())
         except ValueError:
             pass
+    agy_venv = data_home() / "agy-venv"
+    for candidate in (agy_venv / "Scripts" / "python.exe", agy_venv / "bin" / "python"):
+        if candidate.is_file():
+            return str(candidate.resolve())
     ws_venv = HERE.parent.parent.parent.parent / ".venv"
     for candidate in (ws_venv / "Scripts" / "python.exe", ws_venv / "bin" / "python"):
         if candidate.is_file():
@@ -53,6 +57,7 @@ def _preferred_python() -> str | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    apply_enterprise_transport_env()
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
         raise SystemExit("mindie_launch requires a subcommand: hook | mcp | setup")
