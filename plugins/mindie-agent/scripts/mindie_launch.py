@@ -91,6 +91,10 @@ def main(argv: list[str] | None = None) -> int:
         import setup
 
         return setup.main(rest)
+    if role == "update":
+        import component_update
+
+        return component_update.main(rest)
     raise SystemExit(f"unknown mindie_launch role: {role}")
 
 

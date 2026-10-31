@@ -25,6 +25,17 @@ test = [
     "jsonschema>=4",
 ]
 
+[tool.uv.sources]
+mindie-knowledge = { git = "https://github.com/mindie-agent/knowledge", rev = "9a4325858e6fadb10715275826a7795843cbbdf4" }
+remote-dev = { git = "https://github.com/mindie-agent/remote-dev", rev = "85be999811771e03ecc7d78e5e560fac1636e7ef" }
+mindie-diagnostics = { git = "https://github.com/mindie-agent/diagnostics", rev = "5ae643e19223f2181ecdbaa3edaf464137c4805e" }
+
+[tool.uv]
+override-dependencies = [
+    "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@5ae643e19223f2181ecdbaa3edaf464137c4805e",
+    "remote-dev @ git+https://github.com/mindie-agent/remote-dev@85be999811771e03ecc7d78e5e560fac1636e7ef",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

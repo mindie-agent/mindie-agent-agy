@@ -82,3 +82,56 @@ def test_product_and_harness_compatibility_contracts_and_module_invariants():
         if fpath.is_file() and fpath.suffix in {".py", ".json", ".md", ".toml", ".svg"} and ".pytest_cache" not in fpath.parts:
             raw = fpath.read_bytes()
             assert b"\r\n" not in raw, f"CRLF line endings found in {fpath.relative_to(REPO_ROOT)}"
+
+
+def test_flexible_component_update_baseline_and_atomic_rebind(tmp_path, monkeypatch):
+    from mindie_knowledge.component_runtime import source_baseline
+    import component_update
+    import setup
+
+    baseline = source_baseline(REPO_ROOT)
+    assert set(baseline["runtime"]) == {"mindie-knowledge", "remote-dev", "mindie-diagnostics"}
+    assert all(len(rev) == 40 for rev in baseline["runtime"].values())
+
+    cfg_file = tmp_path / "config" / "agy.json"
+    monkeypatch.setenv("MINDIE_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("MINDIE_DATA_HOME", str(tmp_path / "data"))
+    setup.ensure_default_profile(config=cfg_file, workspace_root=tmp_path)
+
+    fake_py = tmp_path / "new-venv" / "bin" / "python"
+    fake_py.parent.mkdir(parents=True, exist_ok=True)
+    fake_py.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    fake_artifact = {
+        "generation": str(tmp_path / "gen-1"),
+        "source": str(REPO_ROOT),
+        "python": str(fake_py),
+        "components": {
+            "schema": "mindie-component-runtime/1",
+            "adapter_source_sha256": baseline["source_sha256"],
+            "runtime": {
+                "mindie-knowledge": {
+                    "repository": "mindie-agent/knowledge",
+                    "version": "0.13.99",
+                    "revision": "a" * 40,
+                }
+            },
+            "lock_sha256": "b" * 64,
+        },
+        "installed": {
+            "mindie-knowledge": {
+                "repository": "mindie-agent/knowledge",
+                "version": "0.13.99",
+                "revision": "a" * 40,
+            }
+        },
+    }
+    monkeypatch.setattr(component_update, "prepare", lambda *a, **kw: fake_artifact)
+    res = component_update.check(config=cfg_file, source=REPO_ROOT)
+    assert res["status"] == "updated"
+    assert Path(res["python"]).resolve() == fake_py.resolve()
+
+    rebound = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert Path(rebound["python"]).resolve() == fake_py.resolve()
+    assert rebound["component_runtime"]["runtime"]["mindie-knowledge"]["version"] == "0.13.99"
+
