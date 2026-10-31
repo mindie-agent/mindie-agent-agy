@@ -75,9 +75,7 @@ Default public MCP discovery (`mindie-remote-dev` and `mindie-tools`) excludes a
 
 ---
 
-## Quick Start
-
-### Option 1: Quick Install via Prompt
+## Quick Start (One-Sentence Agent Install)
 
 Copy and paste the prompt below directly to your Antigravity Agent and let it install and verify the plugin for you:
 
@@ -124,21 +122,9 @@ If you are an AI Agent asked by the user to install this plugin, execute the fol
    ```sh
    pytest mindie-agent-agy/tests -q
    ```
-   - Report the verified GitHub account (`$GH_USER`), plugin mount path, and initialized profile (`~/.config/mindie-agent/agy.json`), then present the [Contribution Notice](plugins/mindie-agent/skills/mindie-agent/references/user-notice.md) and [Workspace Setup](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md).
+   - Report the verified GitHub account (`$GH_USER`), plugin mount path, and initialized profile (`~/.config/mindie-agent/agy.json`), then present the [Contribution Notice](plugins/mindie-agent/skills/mindie-agent/references/user-notice.md) and [Workspace Setup](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md), and let the user know they can type **`/mindie-agent help me finish first-time setup`** to activate the session lease.
 
 </details>
-
-### Option 2: Manual Terminal Install
-
-From your workspace root in macOS / Linux / WSL or Windows PowerShell:
-
-```sh
-git clone https://github.com/mindie-agent/mindie-agent-agy.git
-python -c "import shutil; from pathlib import Path; shutil.copytree('mindie-agent-agy/plugins/mindie-agent', Path('.agents/plugins/mindie-agent'), dirs_exist_ok=True)"
-python .agents/plugins/mindie-agent/scripts/setup.py init --workspace-root .
-```
-
-After installation, type **`/mindie-agent help me finish first-time setup`** in Antigravity to activate the session lease and complete onboarding.
 
 ---
 
@@ -162,20 +148,23 @@ MindIE Agent routes interactive commands through **a single unified entrypoint: 
 ```mermaid
 flowchart LR
   AGY["Google Antigravity (AGY)<br/>(Hooks / MCP stdio / Brain JSONL)"] --> Entry["mindie-agent-agy<br/>(Native Bridge & Session Lease Gate)"]
-  Entry --> Knowledge["mindie-agent/knowledge<br/>(BM25/Block Search, Gitleaks Redaction & PR Loop)"]
-  Knowledge --> Feed["mindie-agent/knowledge-vllm-ascend<br/>(vLLM-Ascend Knowledge Feed)"]
+  Entry --> Knowledge["mindie-agent/knowledge<br/>(L1–L4 Graded Search, Gitleaks Redaction & C6 Distillation)"]
+  Knowledge --> Feed["mindie-agent/knowledge-*<br/>(7 Public Domain Corpora)"]
   Entry --> RemoteDev["mindie-agent/remote-dev<br/>(SSH Remote Ascend Files, Patches & Jobs)"]
-  Entry --> Diagnostics["mindie-agent/diagnostics<br/>(Bounded Local Diagnostics & Opt-In Reporter)"]
+  Entry --> Tools["mindie-tools<br/>(profiler / sim / npu-top / coordinator / diagnostics)"]
 ```
 
 | Repository / Component | Responsibility |
 |---|---|
-| [`mindie-agent/mindie-agent`](https://github.com/mindie-agent/mindie-agent) | Top-level architecture, MindIE Agent Engineering Design Principles (`v0.0.2`), domain boundaries, and paired-release governance. |
-| `mindie-agent/mindie-agent-agy` (this repo) | Google Antigravity native plugin bundle (`plugins/mindie-agent/`), `PreInvocation` manual session gate, `PreToolUse` one-shot call binding, `transcript_full.jsonl` public transcript parser, and isolated summary worker. |
-| [`mindie-agent/knowledge`](https://github.com/mindie-agent/knowledge) | Shared knowledge core: local SQLite/BM25 search, deterministic redaction, capture queue, block-index scheduling, and GitHub PR publication reconciliation. |
-| [`mindie-agent/knowledge-vllm-ascend`](https://github.com/mindie-agent/knowledge-vllm-ascend) | Curated `vllm-ascend` domain knowledge feed. |
+| [`mindie-agent/mindie-agent`](https://github.com/mindie-agent/mindie-agent) | Top-level architecture, MindIE Agent Engineering Design Principles, domain boundaries, and paired-release governance. |
+| `mindie-agent/mindie-agent-agy` (this repo) | Google Antigravity native plugin bundle (`plugins/mindie-agent/`), `PreInvocation` manual session gate, `PreToolUse` one-shot call binding, `transcript_full.jsonl` public transcript parser, and isolated summary/distillation worker. |
+| [`mindie-agent/knowledge`](https://github.com/mindie-agent/knowledge) | Shared knowledge core: `L1–L4` graded retrieval, deterministic redaction, capture queue, C6 experience distillation, and GitHub PR publication reconciliation. |
 | [`mindie-agent/remote-dev`](https://github.com/mindie-agent/remote-dev) | Editor-semantics remote file operations, patching, managed background jobs, and live log polling over SSH for Ascend servers (with native Antigravity tool and parameter aliases). |
-| [`mindie-agent/diagnostics`](https://github.com/mindie-agent/diagnostics) | Bounded local diagnostic logs and optional sanitized GitHub Issue fault reporting. |
+| [`mindie-agent/profiler`](https://github.com/mindie-agent/profiler) | Standalone Ascend NPU performance collection, kernel/comm breakdown, and cross-run comparison CLI (`mindie-profiler`). |
+| [`mindie-agent/sim`](https://github.com/mindie-agent/sim) | Standalone Ascend A2/A3/A5 4-layer white-box performance simulator and Roofline solver (`mindie-sim`, supporting TP/DP/EP/PP/CP/DCP/SP). |
+| [`mindie-agent/npu-top`](https://github.com/mindie-agent/npu-top) | Loopback Ascend NPU fleet monitor and per-Die telemetry CLI/MCP (`npu-top`). |
+| [`mindie-agent/coordinator`](https://github.com/mindie-agent/coordinator) | Ascend host hardware probe, container pool, and exclusive NPU Die / port lease coordinator (`mindie-coordinator`, natively recognizing `AGY_CONVERSATION_ID`). |
+| [`mindie-agent/diagnostics`](https://github.com/mindie-agent/diagnostics) | Bounded local diagnostic logs, cascade root-cause folding, and optional sanitized GitHub Issue fault reporting. |
 
 ### Local Storage Layout
 

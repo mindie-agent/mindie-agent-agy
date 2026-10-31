@@ -34,6 +34,9 @@
       ],
       "test_ids": [
         "tests/test_agy_plugin.py::test_plugin_manifest_and_root_hooks_layout"
+      ],
+      "evidence_refs": [
+        "docs/harness-interfaces.md"
       ]
     },
     "hooks.session-start": {
@@ -50,6 +53,9 @@
       ],
       "test_ids": [
         "tests/test_agy_lifecycle.py::test_passive_session_start_and_ordinary_pre_invocation_stay_quiet"
+      ],
+      "evidence_refs": [
+        "docs/harness-interfaces.md"
       ]
     },
     "hooks.pre-invocation": {
@@ -66,6 +72,9 @@
       ],
       "test_ids": [
         "tests/test_agy_lifecycle.py::test_explicit_mindie_agent_gesture_activates_and_deactivates_lease"
+      ],
+      "evidence_refs": [
+        "docs/harness-interfaces.md"
       ]
     },
     "hooks.pre-tool-use": {
@@ -82,6 +91,9 @@
       ],
       "test_ids": [
         "tests/test_agy_lifecycle.py::test_pre_tool_use_binds_mcp_call_and_rejects_replay"
+      ],
+      "evidence_refs": [
+        "docs/harness-interfaces.md"
       ]
     },
     "hooks.stop": {
@@ -98,6 +110,9 @@
       ],
       "test_ids": [
         "tests/test_agy_lifecycle.py::test_stop_never_forces_continuation_and_requires_manual_lease"
+      ],
+      "evidence_refs": [
+        "docs/harness-interfaces.md"
       ]
     },
     "mcp.stdio": {
@@ -115,6 +130,10 @@
       "test_ids": [
         "tests/test_agy_mcp_and_knowledge.py::test_public_mcp_excludes_knowledge_even_when_session_is_active",
         "tests/test_agy_mcp_and_knowledge.py::test_receipt_honesty_preserves_succeeded_remote_result_on_local_sqlite_error"
+      ],
+      "evidence_refs": [
+        "docs/harness-interfaces.md",
+        "docs/failure-diagnostics.md"
       ]
     },
     "transcript.brain-jsonl": {
@@ -131,6 +150,9 @@
       ],
       "test_ids": [
         "tests/test_agy_transcript.py::test_transcript_extracts_public_messages_and_excludes_thinking_and_metadata"
+      ],
+      "evidence_refs": [
+        "docs/public-transcript.md"
       ]
     },
     "summary.structured-output": {
@@ -147,6 +169,9 @@
       ],
       "test_ids": [
         "tests/test_agy_organizer.py::test_organizer_emits_valid_summary_outcome_and_never_retries_unknown"
+      ],
+      "evidence_refs": [
+        "docs/failure-diagnostics.md"
       ]
     }
   }

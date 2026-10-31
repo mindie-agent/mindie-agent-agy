@@ -75,9 +75,7 @@ MindIE Agent 采用**「领域知识与 Skill 手动按需触发 + 远端开发�
 
 ---
 
-## 快速开始
-
-### 方式一：通过提示词交由 Agent 自动安装（Quick Install via Prompt）
+## 快速开始（交给 Agent 一句话自动安装）
 
 直接复制下面这句话发送给你的 Antigravity Agent，由其自动完成环境检查、插件部署与初始化：
 
@@ -125,21 +123,9 @@ MindIE Agent 采用**「领域知识与 Skill 手动按需触发 + 远端开发�
    pytest mindie-agent-agy/tests -q
    ```
    - 向用户汇报已验证的 GitHub 账号（`$GH_USER`）、插件挂载路径以及默认 Profile（`~/.config/mindie-agent/agy.json`）初始化状态。
-   - 随后介绍 [用户须知](plugins/mindie-agent/skills/mindie-agent/references/user-notice.md) 与 [工作区配置指南](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md)。
+   - 随后介绍 [用户须知](plugins/mindie-agent/skills/mindie-agent/references/user-notice.md) 与 [工作区配置指南](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md)，并提示用户输入 **`/mindie-agent 帮我完成首次配置`** 即可启用领域知识与 Skill 引导。
 
 </details>
-
-### 方式二：终端手动快速安装（Manual Terminal Install）
-
-在工作区根目录终端（macOS / Linux / WSL 或 Windows PowerShell）执行：
-
-```sh
-git clone https://github.com/mindie-agent/mindie-agent-agy.git
-python -c "import shutil; from pathlib import Path; shutil.copytree('mindie-agent-agy/plugins/mindie-agent', Path('.agents/plugins/mindie-agent'), dirs_exist_ok=True)"
-python .agents/plugins/mindie-agent/scripts/setup.py init --workspace-root .
-```
-
-安装完成后，在 Antigravity 对话框输入 **`/mindie-agent 帮我完成首次配置`** 即可在当前会话启用领域知识与 Skill 引导。
 
 ---
 
@@ -163,20 +149,23 @@ MindIE Agent 将交互能力收敛在 **`/mindie-agent` 这一统一入口**中�
 ```mermaid
 flowchart LR
   AGY["Google Antigravity (AGY)<br/>(Hooks / MCP stdio / Brain JSONL)"] --> Entry["mindie-agent-agy<br/>(原生事件桥接 & 会话租约门控)"]
-  Entry --> Knowledge["mindie-agent/knowledge<br/>(BM25/分块检索、Gitleaks 脱敏与 PR 闭环)"]
-  Knowledge --> Feed["mindie-agent/knowledge-vllm-ascend<br/>(vLLM-Ascend 领域知识源)"]
+  Entry --> Knowledge["mindie-agent/knowledge<br/>(L1–L4 分级检索、Gitleaks 脱敏与 C6 蒸馏)"]
+  Knowledge --> Feed["mindie-agent/knowledge-*<br/>(七大公开领域知识库)"]
   Entry --> RemoteDev["mindie-agent/remote-dev<br/>(SSH 远端昇腾文件、补丁与后台作业)"]
-  Entry --> Diagnostics["mindie-agent/diagnostics<br/>(有界本地诊断 & 可选故障上报)"]
+  Entry --> Tools["mindie-tools<br/>(profiler / sim / npu-top / coordinator / diagnostics)"]
 ```
 
 | 仓库 / 组件 | 核心职责 |
 |---|---|
-| [`mindie-agent/mindie-agent`](https://github.com/mindie-agent/mindie-agent) | 顶层架构、MindIE Agent 工程设计原则（`v0.0.2`）、领域边界与配套发布规范。 |
-| `mindie-agent/mindie-agent-agy`（本仓库） | Google Antigravity 原生插件包（`plugins/mindie-agent/`）、`PreInvocation` 手动会话激活门控、`PreToolUse` 单次调用绑定、`transcript_full.jsonl` 公开对话解析与隔离摘要 Worker。 |
-| [`mindie-agent/knowledge`](https://github.com/mindie-agent/knowledge) | 共享知识核心：本地 SQLite/BM25 检索、确定性脱敏、采集队列、分块导航索引与 GitHub PR 发布对账。 |
-| [`mindie-agent/knowledge-vllm-ascend`](https://github.com/mindie-agent/knowledge-vllm-ascend) | `vllm-ascend` 领域知识包。 |
-| [`mindie-agent/remote-dev`](https://github.com/mindie-agent/remote-dev) | 面向远端昇腾服务器的 SSH 文件读写、补丁同步、受管后台作业与实时日志流（内置 Antigravity 工具与参数别名映射）。 |
-| [`mindie-agent/diagnostics`](https://github.com/mindie-agent/diagnostics) | 本地有界结构化诊断日志与可选的脱敏 GitHub Issue 自动上报。 |
+| [`mindie-agent/mindie-agent`](https://github.com/mindie-agent/mindie-agent) | 顶层架构、MindIE Agent 工程设计原则、领域边界与配套发布规范。 |
+| `mindie-agent/mindie-agent-agy`（本仓库） | Google Antigravity 原生插件包（`plugins/mindie-agent/`）、`PreInvocation` 手动会话激活门控、`PreToolUse` 单次调用绑定、`transcript_full.jsonl` 公开对话解析与隔离摘要/蒸馏 Worker。 |
+| [`mindie-agent/knowledge`](https://github.com/mindie-agent/knowledge) | 共享知识核心：`L1–L4` 分级检索、确定性脱敏、采集队列、C6 自动经验蒸馏与 GitHub PR 发布对账。 |
+| [`mindie-agent/remote-dev`](https://github.com/mindie-agent/remote-dev) | 面向远端昇腾服务器的 SSH 文件读写、补丁同步、受管后台作业与实时日志流（原生内置 Antigravity 工具与参数别名映射）。 |
+| [`mindie-agent/profiler`](https://github.com/mindie-agent/profiler) | 昇腾 NPU 性能采集、算子/通信拆解与跨次对比 CLI（`mindie-profiler`）。 |
+| [`mindie-agent/sim`](https://github.com/mindie-agent/sim) | 昇腾 A2/A3/A5 四层白盒性能仿真与 Roofline 理论边界求解器（`mindie-sim`，支持 TP/DP/EP/PP/CP/DCP/SP 七维并行）。 |
+| [`mindie-agent/npu-top`](https://github.com/mindie-agent/npu-top) | 昇腾集群 NPU 实时状态看板与单 Die 观测 CLI/MCP（`npu-top`）。 |
+| [`mindie-agent/coordinator`](https://github.com/mindie-agent/coordinator) | 昇腾开发机硬件探针、容器准备与 NPU Die / 端口排他租约协调服务（`mindie-coordinator`，原生识别 `AGY_CONVERSATION_ID`）。 |
+| [`mindie-agent/diagnostics`](https://github.com/mindie-agent/diagnostics) | 本地有界结构化诊断日志、根因折叠与可选的脱敏 GitHub Issue 自动上报。 |
 
 ### 本地目录说明
 

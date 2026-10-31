@@ -72,6 +72,10 @@ COMPONENT_DESCRIPTIONS = {
         "Phy-ID 0..15 mapping), bind containers, and acquire/inspect/release NPU and "
         "service-port leases through mindie-coordinator."
     ),
+    "npu_top": (
+        "Observe live Ascend NPU fleet telemetry, per-Die HBM/utilization, and active "
+        "processes across A2/A3/A5 servers using npu-top (observation-only)."
+    ),
 }
 
 
@@ -252,6 +256,11 @@ def _resolve_component_command(component: str, *, config=None) -> list[str]:
     python_exe = adapter.get("python") or sys.executable
     if component == "diagnostics":
         return [python_exe, "-I", "-X", "utf8", "-m", "mindie_diagnostics.cli"]
+    if component == "npu_top":
+        exe = shutil.which("npu-top")
+        if exe:
+            return [exe]
+        return [python_exe, "-I", "-X", "utf8", "-m", "npu_top.cli"]
     module_map = {
         "profiler": "mindie_profiler",
         "sim": "mindie_sim",
@@ -343,6 +352,8 @@ def call_tools_surface(
             if type(timeout_ms) is not int or not 1 <= timeout_ms <= 300000:
                 raise ValueError("timeout_ms must be an integer between 1 and 300000")
 
+            if session and session != "agy-default-session":
+                os.environ["AGY_CONVERSATION_ID"] = session
             cmd = _resolve_component_command(component, config=config) + argv
             proc = bounded_run(cmd, "", timeout=timeout_ms / 1000.0, max_output=budget * 4)
             payload = dict(

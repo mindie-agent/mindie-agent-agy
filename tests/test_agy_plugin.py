@@ -38,14 +38,25 @@ def test_product_and_harness_compatibility_contracts_and_module_invariants():
     product = json.loads((REPO_ROOT / "product-contract.json").read_text(encoding="utf-8"))
     assert product["schema"] == "mindie-product-contract/1"
     assert product["harness"] == "antigravity"
-    assert "mindie-knowledge" in product["components"]
-    assert "remote-dev" in product["components"]
+    assert set(product["components"]) == {
+        "mindie-knowledge",
+        "remote-dev",
+        "mindie-diagnostics",
+        "mindie-coordinator",
+        "mindie-profiler",
+        "mindie-sim",
+        "npu-top",
+    }
     assert (PLUGIN_ROOT / "skills" / "mindie-agent" / "SKILL.md").is_file()
     assert (SCRIPTS_DIR / "organizer.py").is_file()
 
     compat = json.loads((REPO_ROOT / "harness-compatibility.json").read_text(encoding="utf-8"))
     assert compat["schema"] == "mindie-harness-compatibility/1"
     assert set(compat["used_interfaces"]) == set(compat["interface_registry"])
+    from mindie_knowledge.releases import supports_harness, validate_compatibility
+
+    validate_compatibility(compat, harness_name="antigravity")
+    assert supports_harness(compat, harness_name="antigravity", harness_version="2.0.0")
 
     for iface_id, entry in compat["interface_registry"].items():
         assert entry["code_paths"], f"{iface_id} missing code_paths"

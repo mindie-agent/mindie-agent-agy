@@ -33,7 +33,15 @@ def test_public_mcp_excludes_knowledge_even_when_session_is_active(tmp_path: Pat
 
     assert "remote_read" in remote_names
     assert "remote_bash" in remote_names
-    assert {"mindie_status", "profiler", "sim", "coordinator", "diagnostics_status", "diagnostics_bundle"} <= tool_names
+    assert {
+        "mindie_status",
+        "profiler",
+        "sim",
+        "coordinator",
+        "npu_top",
+        "diagnostics_status",
+        "diagnostics_bundle",
+    } <= tool_names
 
     all_public = remote_names | tool_names
     for forbidden in ("knowledge_query", "knowledge_explain", "knowledge_feedback", "knowledge_distill", "knowledge_sync"):
