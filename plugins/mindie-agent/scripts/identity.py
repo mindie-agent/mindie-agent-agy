@@ -40,7 +40,7 @@ SESSION_RE = re.compile(
 )
 GESTURE_RE = re.compile(r"^\s*(?:/mindie-agent|\$mindie-agent(?::mindie-agent)?)(?=\s|$)")
 MCP_EAGER_RE = re.compile(
-    r"^mcp_(mindie[-_]remote[-_]dev|mindie[-_]tools)_([A-Za-z0-9_.]+)\Z"
+    r"^mcp_(?:mindie[-_]agent[-_])?(mindie[-_]remote[-_]dev|mindie[-_]tools)_([A-Za-z0-9_.]+)\Z"
 )
 BIND_TTL_SECONDS = 120.0
 MAX_HOOK_BYTES = 32 * 1024 * 1024
@@ -119,6 +119,8 @@ def parse_agy_mcp_tool(tool_call: dict) -> tuple[str, str, dict] | None:
         if not isinstance(server, str) or not isinstance(tool_name, str):
             return None
         norm_server = server.replace("_", "-")
+        if norm_server.startswith("mindie-agent-"):
+            norm_server = norm_server[len("mindie-agent-"):]
         if norm_server == "mindie-remote-dev":
             return "remote", tool_name, inner_args if isinstance(inner_args, dict) else {}
         if norm_server == "mindie-tools":

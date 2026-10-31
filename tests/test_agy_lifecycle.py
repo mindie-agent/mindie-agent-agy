@@ -115,6 +115,28 @@ def test_pre_tool_use_binds_mcp_call_and_rejects_replay(tmp_path: Path):
     with pytest.raises(ValueError, match="no active PreToolUse bind"):
         identity.claim_bind("remote", "remote_read", args)
 
+    # Also verify plugin-namespaced lazy `call_mcp_tool` (`mindie-agent_mindie-tools`)
+    lazy_res = bridge.handle_pre_tool_use(
+        {
+            "conversationId": SESSION_A,
+            "workspacePaths": [str(workspace)],
+            "stepIdx": 8,
+            "toolCall": {
+                "name": "call_mcp_tool",
+                "args": {
+                    "ServerName": "mindie-agent_mindie-tools",
+                    "ToolName": "mindie_status",
+                    "Arguments": {},
+                },
+            },
+        }
+    )
+    assert lazy_res == {"decision": "allow"}
+    claimed_lazy = identity.claim_bind("tools", "mindie_status", {})
+    assert claimed_lazy["session"] == SESSION_A
+    assert claimed_lazy["step_idx"] == 8
+    identity.finish_bind(claimed_lazy["bind_id"], True)
+
 
 def test_stop_never_forces_continuation_and_requires_manual_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     workspace = tmp_path / "ws"
