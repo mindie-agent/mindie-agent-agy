@@ -80,6 +80,13 @@ def ensure_default_profile(
 
     validation = validate_contracts()
     gitleaks = shutil.which("gitleaks")
+    if not gitleaks:
+        cache_dir = Path.home() / ".cache" / "mindie-agent" / "gitleaks"
+        if cache_dir.is_dir():
+            for candidate in sorted(cache_dir.rglob("gitleaks*"), reverse=True):
+                if candidate.is_file() and candidate.name in {"gitleaks", "gitleaks.exe"}:
+                    gitleaks = str(candidate.resolve())
+                    break
 
     cfile = consent_path(cfg_file)
     engine_payload = dict(
@@ -134,6 +141,7 @@ def configure_community(
     config: str | Path | None = None,
     enabled: bool,
     fork: str | None = None,
+    account: str | None = None,
     project_root: str | Path | None = None,
     remote_project_root: str | None = None,
     visibility: str = "public",
@@ -146,10 +154,17 @@ def configure_community(
     cfile = consent_path(cfg_file).resolve()
     consent_store.record_choice(cfile, "contribute" if enabled else "disabled")
     current = settings_mod.load(comm_file)
-    roots = (
-        [str(Path(project_root).resolve())]
-        if project_root is not None
-        else [str(p) for p in current.project_roots]
+    roots = [str(p) for p in current.project_roots]
+    if project_root is not None:
+        resolved_root = str(Path(project_root).resolve())
+        if resolved_root not in roots:
+            roots.insert(0, resolved_root)
+    resolved_fork = fork if fork is not None else current.raw.get("fork")
+    resolved_account = (
+        account
+        if account is not None
+        else current.raw.get("account")
+        or (resolved_fork.split("/", 1)[0] if isinstance(resolved_fork, str) and "/" in resolved_fork else None)
     )
     updated = settings_mod.write(
         comm_file,
@@ -157,7 +172,8 @@ def configure_community(
         repository=repository,
         project_roots=roots,
         consent_config=str(cfile),
-        fork=fork if fork is not None else current.raw.get("fork"),
+        fork=resolved_fork,
+        account=resolved_account,
         visibility=visibility,
         remote_project_root=(
             remote_project_root
