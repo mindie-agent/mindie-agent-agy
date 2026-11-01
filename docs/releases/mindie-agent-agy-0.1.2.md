@@ -7,7 +7,7 @@
 ## 核心交付特性
 
 1. **`mindie-sim 0.9.0` 与 `mindie-profiler 0.5.5` 同步及 `sim` MCP 工具引导**：
-   - 更新 `product-contract.json` 与 `pyproject.toml` 中的组件基线锁定至 `mindie-sim 0.9.0` 与 `mindie-profiler 0.5.5`，并在 `mindie-tools` 的 `sim` 工具描述中补充目录/HF 模型直接组合（`predict`、`efficiency-breakdown`、`sla-frontier`、`pd-disaggregation-solver`、`compose`）、`async_scheduling` 延迟显存释放以及显式 `case.json` 调用范式。
+   - 更新 `product-contract.json` 与 `pyproject.toml` 中的组件基线锁定至 `mindie-sim 0.9.0` 与 `mindie-profiler 0.5.5`，并在 `mindie-tools` 的 `sim`、`profiler`、`coordinator` 工具描述中补充目录/HF 模型直接合成（`compose`）、评估子命令（`predict`、`efficiency`、`sla`、`sweep --mode pd`、`skew`、`graph`）以及 `async_scheduling` 延迟显存释放调用范式。
 2. **企业网络安装与后台组件热更新加固**：
    - `setup.py` 自动注入企业代理系统证书（`UV_SYSTEM_CERTS=true` / `UV_NATIVE_TLS=true`）与 Windows 长路径/LF 源码基线暂存；`mcp_server.py` 与 `bridge.py` 支持非阻塞后台组件更新检查。
 3. **回执诚实性（Receipt Honesty）与超时算术**：

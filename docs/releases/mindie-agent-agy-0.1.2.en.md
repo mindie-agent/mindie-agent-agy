@@ -7,7 +7,7 @@
 ## Key Highlights
 
 1. **`mindie-sim 0.9.0` & `mindie-profiler 0.5.5` Alignment and `sim` MCP Guidance**:
-   - Advances `product-contract.json` and `pyproject.toml` component pins to `mindie-sim 0.9.0` and `mindie-profiler 0.5.5`, and updates the `sim` MCP tool description with direct catalog/HF composition examples (`predict`, `efficiency-breakdown`, `sla-frontier`, `pd-disaggregation-solver`, `compose`), `async_scheduling` delayed HBM release, and explicit case-file invocation.
+   - Advances `product-contract.json` and `pyproject.toml` component pins to `mindie-sim 0.9.0` and `mindie-profiler 0.5.5`, and updates the `sim`, `profiler`, and `coordinator` MCP tool descriptions with `compose` catalog/HF synthesis, evaluation subcommands (`predict`, `efficiency`, `sla`, `sweep --mode pd`, `skew`, `graph`), and `async_scheduling` delayed HBM release.
 2. **Enterprise-Network Installation & Background Component Update Hardening**:
    - `setup.py` configures enterprise system TLS certificates (`UV_SYSTEM_CERTS=true` / `UV_NATIVE_TLS=true`) and LF source baseline staging across macOS, Linux, and Windows; `mcp_server.py` and `bridge.py` support non-blocking background component update checks.
 3. **Receipt Honesty & Timeout Arithmetic**:

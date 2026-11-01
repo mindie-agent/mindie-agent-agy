@@ -49,6 +49,7 @@ from paths import config_path, read_json, remote_receipts_path
 
 REMOTE_GRACE_SECONDS = 60.0
 REMOTE_MIN_BUDGET_SECONDS = 180.0
+COMPONENT_CAPTURE_LIMIT_BYTES = 16 * 1024 * 1024
 REMOTE_NATIVE_MAX_WAIT_MS = {
     "remote_write_stdin": 300000,
     "remote_job_stdin": 300000,
@@ -61,24 +62,29 @@ COMPONENT_DESCRIPTIONS = {
     "profiler": (
         "Inspect and analyze Ascend NPU profiling captures using mindie-profiler. "
         "Pass CLI arguments as an argv array, e.g. ['inventory', '--root', '/capture'] "
-        "or ['analyze', '--root', '/capture', '--full-range']. Also supports "
-        "correlate, compare, sql, camodel and kernels."
+        "or ['analyze', '--root', '/capture', '--full-range']. Commands: inventory, analyze, "
+        "correlate, compare, sql, camodel, and kernels. Use ['--help'] to inspect options "
+        "and --output for large reports."
     ),
     "sim": (
-        "Compute Ascend hardware bounds (A2/A3/A5), pipeline/subgraph/network models, HBM "
-        "capacity (including async_scheduling delayed release), Roofline efficiency, SLA "
-        "concurrency frontiers, and P/D disaggregation using mindie-sim. Pass CLI arguments "
-        "as an argv array: either compose directly from catalog/HF configs (e.g. ['predict', "
-        "'--model-id', 'deepseek-v3', '--hardware-id', 'Ascend910B2C', '--tp', '8', "
-        "'--batch-size', '32', '--async-scheduling'], ['efficiency-breakdown', ...], "
-        "['sla-frontier', ...], ['pd-disaggregation-solver', ...], ['compose', ...]) or "
-        "pass an explicit case file (e.g. ['graph', '/case.json', '--phase', 'prefill', "
-        "'--tokens', '32', '--scope', 'model']). Use ['--help'] for the installed parser."
+        "Compute Ascend hardware bounds (A2/A3/A5), operator/graph/serving latency, HBM capacity "
+        "(including async_scheduling delayed release), Roofline efficiency, SLA concurrency "
+        "frontiers, and P/D disaggregation using mindie-sim. Pass CLI arguments as an argv "
+        "array: synthesize a case from model/hardware IDs or HF config (e.g. ['compose', "
+        "'--model', 'deepseek-v2-lite', '--hardware', 'Ascend910B2C', '--tp', '8', "
+        "'--async-scheduling', '--output', '/case.json']) and evaluate it (e.g. ['predict', "
+        "'/case.json', '--scope', 'body', '--phase', 'decode', '--sequences', '32', "
+        "'--output', '/report.json'], ['efficiency', '/case.json'], "
+        "['sla', '/case.json', '--sla-ms', '50'], ['sweep', '/case.json', '--mode', 'pd'], "
+        "['skew', '/case.json'], or ['graph', '/case.json', '--phase', 'prefill', '--tokens', "
+        "'32', '--output', '/graph.json']). Use ['--help'] to inspect options and --output "
+        "for large reports."
     ),
     "coordinator": (
-        "Manage Ascend host inventory, probe CPU/RAM/NPU capacity (including A3 dual-Die "
-        "Phy-ID 0..15 mapping), bind containers, and acquire/inspect/release NPU and "
-        "service-port leases through mindie-coordinator."
+        "Manage Ascend host inventory, probe CPU/RAM/NPU capacity, bind containers, "
+        "and acquire/inspect/release NPU and service-port leases through "
+        "mindie-coordinator. Pass CLI argv, e.g. ['hosts', '--action', 'list'] "
+        "or ['probe', '--json', '{\"action\":\"hosts\"}']. Use ['--help'] to inspect options."
     ),
     "npu_top": (
         "Observe live Ascend NPU fleet telemetry, per-Die HBM/utilization, and active "
@@ -363,17 +369,31 @@ def call_tools_surface(
             if session and session != "agy-default-session":
                 os.environ["AGY_CONVERSATION_ID"] = session
             cmd = _resolve_component_command(component, config=config) + argv
-            proc = bounded_run(cmd, "", timeout=timeout_ms / 1000.0, max_output=budget * 4)
+            proc = bounded_run(
+                cmd,
+                "",
+                timeout=timeout_ms / 1000.0,
+                max_output=COMPONENT_CAPTURE_LIMIT_BYTES,
+            )
+            reply_limit = budget * 4
+            stdout_bytes = proc.stdout.encode("utf-8", errors="replace")
+            stderr_bytes = proc.stderr.encode("utf-8", errors="replace")
+            truncated = len(stdout_bytes) + len(stderr_bytes) > reply_limit
+            err_budget = min(len(stderr_bytes), reply_limit // 2)
+            out_budget = min(len(stdout_bytes), reply_limit - err_budget)
+            err_budget = min(len(stderr_bytes), reply_limit - out_budget)
             payload = dict(
                 component=component,
                 exit_code=proc.returncode,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
+                stdout=stdout_bytes[:out_budget].decode("utf-8", errors="replace"),
+                stderr=stderr_bytes[:err_budget].decode("utf-8", errors="replace"),
+                output_truncated=truncated,
             )
-            try:
-                payload["result"] = json.loads(proc.stdout)
-            except json.JSONDecodeError:
-                pass
+            if not truncated:
+                try:
+                    payload["result"] = json.loads(proc.stdout)
+                except json.JSONDecodeError:
+                    pass
             succeeded = proc.returncode == 0
             result = dict(
                 content=[dict(type="text", text=json.dumps(payload, ensure_ascii=False))],
