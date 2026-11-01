@@ -178,13 +178,13 @@ def validate_contracts() -> dict:
     root = repo_root()
     contract_file = root / "product-contract.json"
     compat_file = root / "harness-compatibility.json"
-    contract = read_json(contract_file) if contract_file.is_file() else {"native_version": "0.1.1"}
+    contract = read_json(contract_file) if contract_file.is_file() else {"native_version": "0.1.2"}
     compat = read_json(compat_file) if compat_file.is_file() else {"harness": "antigravity"}
     return dict(
         schema="mindie-candidate-check/1",
         status="validated",
         harness=compat.get("harness", "antigravity"),
-        native_version=contract.get("native_version", "0.1.1"),
+        native_version=contract.get("native_version", "0.1.2"),
     )
 
 

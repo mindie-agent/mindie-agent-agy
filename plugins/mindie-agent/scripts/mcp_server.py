@@ -65,8 +65,15 @@ COMPONENT_DESCRIPTIONS = {
         "correlate, compare, sql, camodel and kernels."
     ),
     "sim": (
-        "Compute Ascend hardware bounds (A2/A3/A5), pipeline/subgraph/network models "
-        "and performance predictions using mindie-sim. Pass CLI arguments as an argv array."
+        "Compute Ascend hardware bounds (A2/A3/A5), pipeline/subgraph/network models, HBM "
+        "capacity (including async_scheduling delayed release), Roofline efficiency, SLA "
+        "concurrency frontiers, and P/D disaggregation using mindie-sim. Pass CLI arguments "
+        "as an argv array: either compose directly from catalog/HF configs (e.g. ['predict', "
+        "'--model-id', 'deepseek-v3', '--hardware-id', 'Ascend910B2C', '--tp', '8', "
+        "'--batch-size', '32', '--async-scheduling'], ['efficiency-breakdown', ...], "
+        "['sla-frontier', ...], ['pd-disaggregation-solver', ...], ['compose', ...]) or "
+        "pass an explicit case file (e.g. ['graph', '/case.json', '--phase', 'prefill', "
+        "'--tokens', '32', '--scope', 'model']). Use ['--help'] for the installed parser."
     ),
     "coordinator": (
         "Manage Ascend host inventory, probe CPU/RAM/NPU capacity (including A3 dual-Die "
@@ -464,7 +471,7 @@ def handle_rpc(request: dict, surface: str, *, config=None, receipts: RemoteRece
             result=dict(
                 protocolVersion=params.get("protocolVersion") or "2024-11-05",
                 capabilities=dict(tools=dict(listChanged=False)),
-                serverInfo=dict(name=f"mindie-agy-{surface}", version="0.1.1"),
+                serverInfo=dict(name=f"mindie-agy-{surface}", version="0.1.2"),
             ),
         )
     if method == "tools/list":

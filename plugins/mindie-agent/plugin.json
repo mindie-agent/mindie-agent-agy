@@ -1,7 +1,7 @@
 {
   "name": "mindie-agent",
   "displayName": "MindIE Agent",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Ascend NPU & vLLM-Ascend engineering assistant: on-demand /mindie-agent L1-L4 knowledge flywheel, remote NPU development, profiling, roofline simulation, and cluster lease coordination.",
   "logo": "assets/logo.svg",
   "author": {

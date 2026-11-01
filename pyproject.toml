@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mindie-agent-agy"
-version = "0.1.1"
+version = "0.1.2"
 description = "Google Antigravity (AGY) native harness plugin adapter for MindIE Agent"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -37,8 +37,8 @@ override-dependencies = [
     "remote-dev @ git+https://github.com/mindie-agent/remote-dev@85be999811771e03ecc7d78e5e560fac1636e7ef",
     "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@5ae643e19223f2181ecdbaa3edaf464137c4805e",
     "mindie-coordinator @ git+https://github.com/mindie-agent/coordinator@d146c55c414bfb92136cf5fb7fa11ae14c673ef0",
-    "mindie-profiler @ git+https://github.com/mindie-agent/profiler@22ed2cadff6656c0b26be8cc77ea2bf48a1c0d21",
-    "mindie-sim @ git+https://github.com/mindie-agent/sim@f842e7c0ebbfabae836534152af39665419e7908",
+    "mindie-profiler @ git+https://github.com/mindie-agent/profiler@7cdd56b6cc9e0e7f603368393497487dd2dbfe39",
+    "mindie-sim @ git+https://github.com/mindie-agent/sim@f5608b4943f515c401d2f9b12fffb579a1e2571b",
     "npu-top @ git+https://github.com/mindie-agent/npu-top@ff78215dbe94bb3bd16abc6897878918748b8aee",
 ]
 
