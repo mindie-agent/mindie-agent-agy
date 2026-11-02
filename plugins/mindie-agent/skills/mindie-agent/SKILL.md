@@ -23,7 +23,7 @@ Use this skill **only** after the user explicitly invokes `/mindie-agent` or `$m
      ```
    - Preserve the returned `isError` and nonzero exit status; never fabricate a session ID.
 3. **Always-On Deterministic MCP Tools (`mindie-remote-dev` & `mindie-tools`)**:
-   - `remote_*` (and Antigravity aliases `remote_view_file`, `remote_write_to_file`, `remote_replace_file_content`, `remote_run_command`, `remote_manage_task`, `remote_find_by_name`, `remote_grep_search`, `remote_list_dir`), `profiler`, `sim`, `coordinator`, `diagnostics_status`, `diagnostics_bundle`, and `mindie_status` are available in every session via MCP without requiring `/mindie-agent`.
+   - `remote_*` (and Antigravity aliases `remote_view_file`, `remote_write_to_file`, `remote_replace_file_content`, `remote_run_command`, `remote_manage_task`, `remote_find_by_name`, `remote_grep_search`, `remote_list_dir`), `debugger`, `profiler`, `sim`, `coordinator`, `diagnostics_status`, `diagnostics_bundle`, and `mindie_status` are available in every session via MCP without requiring `/mindie-agent`.
 4. **Two-Step Progressive Knowledge Loading & De-Biased Exploration (`mode="explore"`)**:
    - **Step 1 (`knowledge_query`)**: Query with observed `conditions` (`matched` | `mismatched` | `condition_unknown`; never treat `condition_unknown` as a match).
    - **Step 2 (`knowledge_explain`)**: Batch-read selected `refs=[...]` with `known_refs=[...]` and `token_budget=4096`.

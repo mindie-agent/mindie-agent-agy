@@ -39,6 +39,7 @@ def test_public_mcp_excludes_knowledge_even_when_session_is_active(tmp_path: Pat
         "sim",
         "coordinator",
         "npu_top",
+        "debugger",
         "diagnostics_status",
         "diagnostics_bundle",
     } <= tool_names
