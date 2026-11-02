@@ -2,8 +2,8 @@
 
 [Role]
 Discovers newer formal GitHub Releases of shared MindIE runtime components
-(`mindie-knowledge`, `remote-dev`, `mindie-diagnostics`, `mindie-profiler`,
-`mindie-sim`, `npu-top`, `mindie-coordinator`) and builds an isolated component
+(`mindie-knowledge`, `remote-dev`, `mindie-diagnostics`, `mindie-debugger`,
+`mindie-profiler`, `mindie-sim`, `npu-top`, `mindie-coordinator`) and builds an isolated component
 generation under `state_dir()/component-runtimes` without requiring a new
 `mindie-agent-agy` plugin release.
 

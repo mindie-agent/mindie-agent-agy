@@ -43,6 +43,7 @@ def test_product_and_harness_compatibility_contracts_and_module_invariants():
         "remote-dev",
         "mindie-diagnostics",
         "mindie-coordinator",
+        "mindie-debugger",
         "mindie-profiler",
         "mindie-sim",
         "npu-top",
@@ -79,7 +80,11 @@ def test_product_and_harness_compatibility_contracts_and_module_invariants():
             assert section in text, f"{script.name} missing mandatory header section {section}"
 
     for fpath in REPO_ROOT.rglob("*"):
-        if fpath.is_file() and fpath.suffix in {".py", ".json", ".md", ".toml", ".svg"} and ".pytest_cache" not in fpath.parts:
+        if (
+            fpath.is_file()
+            and fpath.suffix in {".py", ".json", ".md", ".toml", ".svg"}
+            and not any(part in {".pytest_cache", ".venv", ".git"} for part in fpath.parts)
+        ):
             raw = fpath.read_bytes()
             assert b"\r\n" not in raw, f"CRLF line endings found in {fpath.relative_to(REPO_ROOT)}"
 
