@@ -97,6 +97,11 @@ def trigger_background_update_if_due(*, config: str | Path | None = None) -> boo
         return False
 
 
+def _norm_python_path(py_exe: str | Path) -> str:
+    p = Path(py_exe).expanduser()
+    return str(p.parent.resolve() / p.name)
+
+
 def prepare(
     source: str | Path | None = None,
     python: str | Path | None = None,
@@ -122,7 +127,7 @@ def prepare(
     cfg_file = config_path(config)
     adapter = read_json(cfg_file) if cfg_file.is_file() else {}
     source_root = Path(source or repo_root(cfg_file)).resolve()
-    current_python = str(Path(python or adapter.get("python") or sys.executable).resolve())
+    current_python = _norm_python_path(python or adapter.get("python") or sys.executable)
 
     required = required_components(adapter, timeout=min(15.0, remaining(5.0)))
     baseline = source_baseline(source_root)
@@ -178,7 +183,10 @@ def check(
         ensure_default_profile(config=cfg_file)
     adapter = read_json(cfg_file)
     eng_file = engine_config_path(cfg_file)
-    current_python = adapter.get("python") or sys.executable
+    cfg_py = adapter.get("python")
+    if not (isinstance(cfg_py, str) and ("venv" in cfg_py or ".venv" in cfg_py) and "/uv/python/" not in cfg_py):
+        cfg_py = None
+    current_python = cfg_py or sys.executable
 
     status_file = data_home() / "component-update-status.json"
     try:
@@ -204,7 +212,7 @@ def check(
         raise
 
     if artifact is not None:
-        new_python = str(Path(artifact["python"]).resolve())
+        new_python = _norm_python_path(artifact["python"])
         updated_adapter = dict(adapter)
         updated_adapter["python"] = new_python
         updated_adapter["component_runtime"] = artifact["components"]
@@ -224,7 +232,7 @@ def check(
         installed = artifact["installed"]
     else:
         status = "up_to_date"
-        active_python = str(Path(current_python).resolve())
+        active_python = _norm_python_path(current_python)
         try:
             installed = read_inventory(active_python, timeout=15.0)
         except Exception:

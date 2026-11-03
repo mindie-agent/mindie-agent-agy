@@ -100,3 +100,37 @@ def test_remote_timeout_arithmetic_enforces_outer_greater_than_inner_plus_grace(
     assert mcp_server.remote_timeout("remote_bash", {}) == 660.0
     assert mcp_server.remote_timeout("remote_run_command", {"WaitMsBeforeAsync": 10000}) == 660.0
     assert mcp_server.remote_timeout("remote_read", {"timeout_ms": 200000}) == 260.0
+
+
+def test_knowledge_cli_explore_budget_and_rsi_wrappers(tmp_path: Path):
+    import experiment_ledger
+    import rsi_loop
+
+    q_tool = next(t for t in knowledge_cli.KNOWLEDGE_TOOL_SCHEMAS if t["name"] == "knowledge_query")
+    e_tool = next(t for t in knowledge_cli.KNOWLEDGE_TOOL_SCHEMAS if t["name"] == "knowledge_explain")
+    assert q_tool["inputSchema"]["properties"]["token_budget"]["maximum"] == 64000
+    assert e_tool["inputSchema"]["properties"]["token_budget"]["maximum"] == 64000
+
+    ledger_path = tmp_path / "ledger.jsonl"
+    assert experiment_ledger.main(["render", "--ledger", str(ledger_path), "--task-id", "test-rsi"]) == 0
+    assert (
+        rsi_loop.main(
+            [
+                "init",
+                "--state",
+                str(tmp_path / "state.json"),
+                "--task-id",
+                "test-rsi",
+                "--ledger",
+                str(ledger_path),
+                "--baseline-repo",
+                str(Path(__file__).resolve().parents[1]),
+                "--direction",
+                "minimize",
+                "--repetitions",
+                "3",
+            ]
+        )
+        == 0
+    )
+

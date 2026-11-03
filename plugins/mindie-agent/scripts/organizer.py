@@ -36,10 +36,13 @@ import time
 import urllib.error
 import urllib.request
 
-from langchain_core.messages import AIMessage
 from mindie_knowledge.loop import summary_scratch
 from mindie_knowledge.loop.summary_budget import native_timeout
 from mindie_knowledge.materials import summarizer
+
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 
 from paths import state_dir
 
@@ -182,7 +185,9 @@ class NativeSummaryModel:
                 except OSError:
                     self.cleanup_failed = True
 
-    def invoke(self, messages) -> AIMessage:
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
         data = [dict(role=m.type, content=m.content) for m in messages]
         prompt = summarizer.render_prompt(data)
         expected_ids = [m.id for m in messages if getattr(m, "id", None)]

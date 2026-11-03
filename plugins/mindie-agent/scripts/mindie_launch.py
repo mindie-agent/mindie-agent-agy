@@ -36,23 +36,52 @@ HOOK_LOCK_BUDGET = 2.0
 BOOTSTRAP_TOTAL = 540.0
 
 
+def _norm_python_path(py_exe: str | Path) -> Path:
+    p = Path(py_exe).expanduser()
+    return p.parent.resolve() / p.name
+
+
+def _is_venv_python(py: str) -> bool:
+    return bool(
+        isinstance(py, str)
+        and ("venv" in py or ".venv" in py)
+        and "/uv/python/" not in py
+        and "/Cellar/python" not in py
+        and Path(py).is_file()
+    )
+
+
 def _preferred_python() -> str | None:
     cfg = config_path()
     if cfg.is_file():
         try:
             py = read_json(cfg).get("python")
-            if isinstance(py, str) and Path(py).is_file():
-                return str(Path(py).resolve())
+            if _is_venv_python(py):
+                return str(_norm_python_path(py))
         except ValueError:
             pass
     agy_venv = data_home() / "agy-venv"
     for candidate in (agy_venv / "Scripts" / "python.exe", agy_venv / "bin" / "python"):
         if candidate.is_file():
-            return str(candidate.resolve())
+            return str(_norm_python_path(candidate))
     ws_venv = HERE.parent.parent.parent.parent / ".venv"
     for candidate in (ws_venv / "Scripts" / "python.exe", ws_venv / "bin" / "python"):
         if candidate.is_file():
-            return str(candidate.resolve())
+            return str(_norm_python_path(candidate))
+    search_dirs = [cfg.parent]
+    host_cfg_dir = Path.home() / ".config" / "mindie-agent"
+    if host_cfg_dir not in search_dirs:
+        search_dirs.append(host_cfg_dir)
+    for cdir in search_dirs:
+        for sibling_cfg in ("agy.json", "wb.json", "codex.json", "cc.json", "kimi.json"):
+            scfg = cdir / sibling_cfg
+            if scfg.is_file():
+                try:
+                    py = read_json(scfg).get("python")
+                    if _is_venv_python(py):
+                        return str(_norm_python_path(py))
+                except ValueError:
+                    pass
     return None
 
 
@@ -60,12 +89,12 @@ def main(argv: list[str] | None = None) -> int:
     apply_enterprise_transport_env()
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
-        raise SystemExit("mindie_launch requires a subcommand: hook | mcp | setup")
+        raise SystemExit("mindie_launch requires a subcommand: hook | mcp | setup | update")
 
     target_py = _preferred_python()
     if (
         target_py is not None
-        and Path(sys.executable).resolve() != Path(target_py).resolve()
+        and _norm_python_path(sys.executable) != _norm_python_path(target_py)
         and os.environ.get("_MINDIE_AGY_REEXEC") != "1"
     ):
         env = dict(os.environ)

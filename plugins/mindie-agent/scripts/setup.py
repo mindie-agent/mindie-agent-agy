@@ -122,6 +122,12 @@ def stage_source_baseline(source_dir: str | Path | None = None, dest_dir: str | 
     return dst
 
 
+def _norm_python_path(py_exe: str | Path) -> Path:
+    """Normalize a Python executable path while preserving virtualenv `bin/python` symlinks."""
+    p = Path(py_exe).expanduser()
+    return p.parent.resolve() / p.name
+
+
 def ensure_runtime_python(
     source_root: str | Path | None = None,
     python_exe: str | None = None,
@@ -130,9 +136,9 @@ def ensure_runtime_python(
 ) -> str:
     """Return an interpreter with MindIE runtime components installed, bootstrapping `agy-venv` if needed."""
     if python_exe:
-        return str(Path(python_exe).resolve())
+        return str(_norm_python_path(python_exe))
     if importlib.util.find_spec("mindie_knowledge") is not None:
-        return str(Path(sys.executable).resolve())
+        return str(_norm_python_path(sys.executable))
 
     venv_dir = data_home() / "agy-venv"
     venv_py = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -144,7 +150,7 @@ def ensure_runtime_python(
             timeout=15.0,
         )
         if probe.returncode == 0:
-            return str(venv_py.resolve())
+            return str(_norm_python_path(venv_py))
 
     uv = shutil.which("uv")
     if uv is None:
@@ -171,7 +177,7 @@ def ensure_runtime_python(
     if proc.returncode != 0 or not venv_py.is_file():
         detail = (proc.stderr or proc.stdout or "").strip()[-1000:]
         raise RuntimeError(f"uv sync failed while bootstrapping agy-venv (exit {proc.returncode}): {detail}")
-    return str(venv_py.resolve())
+    return str(_norm_python_path(venv_py))
 
 
 def validate_contracts() -> dict:
