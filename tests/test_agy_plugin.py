@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -213,6 +216,118 @@ def test_windows_subprocess_creationflags_prevent_console_window(tmp_path, monke
     assert bg_flags & getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
     assert bg_flags & getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
     assert not (bg_flags & getattr(subprocess, "DETACHED_PROCESS", 0x00000008))
+
+
+def _hide_mindie_knowledge(monkeypatch):
+    import setup
+
+    real_find = setup.importlib.util.find_spec
+
+    def missing_knowledge(name, package=None):
+        if name == "mindie_knowledge":
+            return None
+        return real_find(name, package)
+
+    monkeypatch.setattr(setup.importlib.util, "find_spec", missing_knowledge)
+    monkeypatch.delenv("_MINDIE_AGY_SETUP_BOOTSTRAPPED", raising=False)
+    return setup
+
+
+def test_help_and_dry_run_do_not_bootstrap_runtime(tmp_path, monkeypatch, capsys):
+    import setup
+
+    setup_mod = _hide_mindie_knowledge(monkeypatch)
+    boot: list[str] = []
+
+    def fail_stage(*_args, **_kwargs):
+        boot.append("stage")
+        raise AssertionError("stage_source_baseline")
+
+    def fail_runtime(*_args, **_kwargs):
+        boot.append("runtime")
+        raise AssertionError("ensure_runtime_python")
+
+    def fail_run(*_args, **_kwargs):
+        boot.append("subprocess")
+        raise AssertionError("subprocess.run")
+
+    monkeypatch.setattr(setup_mod, "stage_source_baseline", fail_stage)
+    monkeypatch.setattr(setup_mod, "ensure_runtime_python", fail_runtime)
+    monkeypatch.setattr(setup_mod.subprocess, "run", fail_run)
+
+    for help_argv in (["--help"], ["-h"], ["init", "--help"], ["sharing", "--help"]):
+        with pytest.raises(SystemExit) as exc:
+            setup_mod.main(help_argv)
+        assert exc.value.code in (0, None)
+    with pytest.raises(SystemExit) as exc:
+        setup_mod.main(["--not-a-flag"])
+    assert exc.value.code == 2
+    help_out = capsys.readouterr().out
+    assert "--dry-run" in help_out
+    assert "agy-venv" in help_out
+
+    assert setup_mod.main(["--dry-run"]) == 0
+    dry = json.loads(capsys.readouterr().out)
+    assert dry["status"] == "dry-run"
+    assert dry["cmd"] == "init"
+    assert dry["harness"] == "antigravity"
+    assert dry["would_bootstrap_runtime"] is True
+    assert dry["writes"] == []
+    assert dry["contracts"]["harness"] == "antigravity"
+
+    assert setup_mod.main(
+        ["init", "--dry-run", "--workspace-root", str(tmp_path), "--domain", "vllm-ascend"]
+    ) == 0
+    dry_init = json.loads(capsys.readouterr().out)
+    assert dry_init["cmd"] == "init"
+    assert dry_init["domain"] == "vllm-ascend"
+    assert dry_init["workspace_root"] == str(tmp_path)
+    assert dry_init["writes"] == []
+
+    assert setup_mod.main(["sharing", "--dry-run", "--disable"]) == 0
+    dry_share = json.loads(capsys.readouterr().out)
+    assert dry_share["cmd"] == "sharing"
+    assert dry_share["writes"] == []
+    assert dry_share["sharing"]["disable"] is True
+    assert dry_share["sharing"]["applies_changes"] is False
+
+    data = Path(os.environ["MINDIE_DATA_HOME"])
+    cfg = Path(os.environ["MINDIE_AGENT_CONFIG"])
+    assert not (data / "agy-venv").exists()
+    assert not (data / "agy-source").exists()
+    assert not cfg.exists()
+    assert boot == []
+
+
+def test_init_still_bootstraps_when_knowledge_is_missing(monkeypatch):
+    import subprocess
+    import sys
+
+    setup_mod = _hide_mindie_knowledge(monkeypatch)
+    seen: dict = {}
+
+    def fake_stage(*_args, **_kwargs):
+        seen["stage"] = True
+        return Path(os.environ["MINDIE_DATA_HOME"]) / "agy-source"
+
+    def fake_runtime(*_args, **_kwargs):
+        seen["runtime"] = True
+        return sys.executable
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = list(argv)
+        seen["bootstrapped"] = kwargs.get("env", {}).get("_MINDIE_AGY_SETUP_BOOTSTRAPPED")
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(setup_mod, "stage_source_baseline", fake_stage)
+    monkeypatch.setattr(setup_mod, "ensure_runtime_python", fake_runtime)
+    monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+
+    assert setup_mod.main(["init", "--workspace-root", "/tmp/workspace"]) == 0
+    assert seen["stage"] is True
+    assert seen["runtime"] is True
+    assert seen["bootstrapped"] == "1"
+    assert seen["argv"][-3:] == ["init", "--workspace-root", "/tmp/workspace"]
 
 
 

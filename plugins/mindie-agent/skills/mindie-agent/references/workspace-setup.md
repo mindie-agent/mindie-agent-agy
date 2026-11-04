@@ -45,17 +45,26 @@ registration decisions; ordinary tasks and updates do not repeat onboarding.
 
 ## Native entry
 
-Codex desktop: use **Add project** or an available native project tool and
-verify the selected path in the project list. On supported macOS installations,
-`codex app "<absolute-path>"` opens the workspace. On Windows this command may
-only print the path; finish through the app folder picker. Codex CLI uses
-`codex -C "<absolute-path>"` for the next interactive session, which does not
-register a desktop project. Check the installed CLI help before launching.
+Antigravity (AGY): register the selected absolute path as a folder of an
+Antigravity project, then confirm that folder list. In the Antigravity app,
+use **New Project** (folder-with-plus) and **Add Folder**, or add the folder
+on an existing project's folder list. A project is the set of folders the
+agent may use. Antigravity CLI treats the directory where `agy` is started as
+the workspace root; check `agy --help` on the installed CLI before launching.
+`agy --new-project` creates a project for that session, and
+`agy --project=<project_id>` resumes an existing project by id; neither flag
+by itself adds a folder. `agy --add-dir "<absolute-path>"` and the in-session
+`/add-dir` command add another folder to the active workspace and do not
+replace the launch directory. The path must already exist on the running
+Antigravity host. Local/read-only plugin use still does not require `gh`;
+choosing this source/fork initialization runs the GitHub sign-in step above.
 
 Use available native tools or UI automation to complete the action. If the agent
 cannot operate the required folder picker, give the selected path and that one
 remaining action, and report registration as pending. Never edit private harness
 project databases or create a second client profile to simulate registration.
+Do not write Antigravity project state under `~/.gemini` to pretend a folder
+was registered.
 
 Suggested combined offer (use the user's language):
 
