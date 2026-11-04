@@ -433,4 +433,86 @@ def test_abbreviated_dry_run_never_writes_consent_or_config(tmp_path, monkeypatc
     assert not (cfg.parent / "mindie-consent.json").exists()
 
 
+def test_git_config_count_composition_and_sharing_contract_safety(tmp_path: Path, monkeypatch, capsys):
+    import paths
+    import setup
+
+    pre_env = {
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "http.proxy",
+        "GIT_CONFIG_VALUE_0": "http://proxy.internal:8080",
+        "GIT_CONFIG_KEY_1": "core.longpaths",
+        "GIT_CONFIG_VALUE_1": "false",
+    }
+    composed = paths.apply_enterprise_transport_env(pre_env)
+    assert composed["GIT_CONFIG_COUNT"] == "4"
+    assert composed["GIT_CONFIG_KEY_0"] == "http.proxy"
+    assert composed["GIT_CONFIG_VALUE_0"] == "http://proxy.internal:8080"
+    assert composed["GIT_CONFIG_KEY_1"] == "core.longpaths"
+    assert composed["GIT_CONFIG_VALUE_1"] == "false"
+    assert composed["GIT_CONFIG_KEY_2"] == "core.autocrlf"
+    assert composed["GIT_CONFIG_VALUE_2"] == "false"
+    assert composed["GIT_CONFIG_KEY_3"] == "credential.https://github.com.provider"
+    assert composed["GIT_CONFIG_VALUE_3"] == "github"
+
+    cfg = Path(os.environ["MINDIE_AGENT_CONFIG"])
+    consent_file = cfg.parent / "mindie-consent.json"
+
+    for bad_argv in (["sharing"], ["sharing", "--enable", "--disable"], ["sharing", "--status", "--enable"]):
+        with pytest.raises(SystemExit) as exc:
+            setup.main(bad_argv)
+        assert exc.value.code == 2
+        capsys.readouterr()
+    assert not consent_file.exists()
+
+    # sharing --status runs in pure stdlib without bootstrapping runtime
+    setup_mod = _hide_mindie_knowledge(monkeypatch)
+    monkeypatch.setattr(setup_mod, "ensure_runtime_python", lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no bootstrap")))
+    assert setup_mod.main(["sharing", "--status"]) == 0
+    status_out = json.loads(capsys.readouterr().out)
+    assert status_out["schema"] == "mindie-sharing-status/1"
+    assert status_out["harness"] == "antigravity"
+    assert status_out["consent_choice"] is None
+    assert status_out["sharing_enabled"] is False
+    assert status_out["needs_onboarding_prompt"] is True
+    assert not consent_file.exists()
+
+    # Restore find_spec and verify invalid repository fails before writing consent
+    monkeypatch.undo()
+    with pytest.raises(ValueError, match="invalid repository format"):
+        setup.configure_community(enabled=True, repository="invalid-repo", project_root=tmp_path)
+    assert not consent_file.exists()
+
+    with pytest.raises(ValueError, match="visibility='public'"):
+        setup.configure_community(enabled=True, visibility="private", project_root=tmp_path)
+    assert not consent_file.exists()
+
+
+def test_temp_checkout_script_paths_rebind_to_agy_source(tmp_path: Path, monkeypatch):
+    import shutil
+    import setup
+
+    temp_checkout = tmp_path / "mindie-agent-agy-install"
+    temp_scripts = temp_checkout / "plugins" / "mindie-agent" / "scripts"
+    temp_scripts.mkdir(parents=True)
+    for name in ("pyproject.toml", "product-contract.json", "harness-compatibility.json"):
+        shutil.copy2(REPO_ROOT / name, temp_checkout / name)
+    for script in SCRIPTS_DIR.glob("*.py"):
+        shutil.copy2(script, temp_scripts / script.name)
+
+    monkeypatch.setenv("AGY_PLUGIN_ROOT", str(temp_checkout / "plugins" / "mindie-agent"))
+    monkeypatch.setattr(setup, "__file__", str(temp_scripts / "setup.py"))
+
+    cfg_file = tmp_path / "config" / "agy.json"
+    prof = setup.ensure_default_profile(config=cfg_file, workspace_root=tmp_path)
+    eng_data = json.loads((tmp_path / "config" / "agy.engine.json").read_text(encoding="utf-8"))
+
+    assert "mindie-agent-agy-install" not in prof["runtime_scripts"]
+    assert "mindie-agent-agy-install" not in prof["source_root"]
+    assert "mindie-agent-agy-install" not in eng_data["transcript_adapter"]
+    assert all("mindie-agent-agy-install" not in part for part in eng_data["summary_command"])
+    assert Path(prof["source_root"]).resolve() == (Path(os.environ["MINDIE_DATA_HOME"]) / "agy-source").resolve()
+
+
+
 

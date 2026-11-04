@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/mindie-agent/mindie-agent-agy/releases"><img src="https://img.shields.io/badge/release-v0.1.5-0F766E.svg" alt="Release v0.1.5"></a>
+  <a href="https://github.com/mindie-agent/mindie-agent-agy/releases"><img src="https://img.shields.io/badge/release-v0.1.6-0F766E.svg" alt="Release v0.1.6"></a>
   <a href="harness-compatibility.json"><img src="https://img.shields.io/badge/Antigravity-2.0.0_%E2%80%93_2.99.99-4285F4.svg" alt="Antigravity 2.0.0 - 2.99.99"></a>
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.13-3776AB.svg" alt="Python 3.13"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-0F766E.svg" alt="License: MIT"></a>
@@ -18,7 +18,7 @@
 
 <p align="center">
   <a href="README.md">中文</a> | <b>English</b> ·
-  <a href="#quick-start">Quick Start</a> ·
+  <a href="#quick-start-one-sentence-agent-install">Quick Start</a> ·
   <a href="#why-use-this-plugin-trigger-modes--usage-examples">What Can It Do?</a> ·
   <a href="#everyday-usage--operator-commands-unified-mindie-agent-entry">Commands</a> ·
   <a href="#architecture--component-map">Architecture</a> ·
@@ -27,7 +27,7 @@
 
 ---
 
-**MindIE Agent for Google Antigravity** (`mindie-agent-agy`) is the native Google Antigravity (`agy`) plugin for [MindIE Agent](https://github.com/mindie-agent/mindie-agent), supporting the **Ascend NPU AI Infra design, development, and testing lifecycle**. Release `v0.1.5` (paired with `mindie-agent 0.1.8`) delivers three core capabilities: **local and community knowledge base retrieval with privacy redaction** (focused on `vLLM-Ascend` feature development and `AscendC` / `Triton` kernel engineering), **remote SSH / Docker development and NPU inspection**, and **unified fault diagnostics with sanitized reporting**; additional Ascend software domains are tracked on the project roadmap.
+**MindIE Agent for Google Antigravity** (`mindie-agent-agy`) is the native Google Antigravity (`agy`) plugin for [MindIE Agent](https://github.com/mindie-agent/mindie-agent), supporting the **Ascend NPU AI Infra design, development, and testing lifecycle**. Release `v0.1.6` (paired with `mindie-agent 0.1.8`) delivers three core capabilities: **local and community knowledge base retrieval with privacy redaction** (focused on `vLLM-Ascend` feature development and `AscendC` / `Triton` kernel engineering), **remote SSH / Docker development and NPU inspection**, and **unified fault diagnostics with sanitized reporting**; additional Ascend software domains are tracked on the project roadmap.
 
 Designed around the [MindIE Agent Engineering Design Principles](https://github.com/mindie-agent/mindie-agent/blob/main/docs/design-principles.en.md), **domain knowledge and the Skill system are invoked manually on demand via `/mindie-agent`** so they never interfere with unrelated tasks, while **`mindie-remote-dev` remote NPU development and testing tools trigger automatically by default** in everyday conversation—enforcing Receipt Honesty and strict timeout arithmetic without silent fallbacks or blind retries.
 
@@ -89,7 +89,7 @@ Please install https://github.com/mindie-agent/mindie-agent-agy for me
 If you are an AI Agent asked by the user to install this plugin, execute the following deterministic steps directly in the terminal **without asking the user to read the documentation manually**:
 
 1. **Check prerequisites and the `gh` GitHub channel (Hard Requirement)**:
-   **A stable, authenticated GitHub CLI (`gh`) channel is a hard requirement**—it powers plugin fetches, `knowledge-vllm-ascend` sync, automated PR publication, and opt-in fault reporting. Long paths, LF, and the GitHub credential provider are injected into **this process only** (the same pairs as `apply_enterprise_transport_env`). Do not run `git config --global` during install:
+   **A stable, authenticated GitHub CLI (`gh`) channel is a hard requirement**—it powers plugin fetches, `knowledge-vllm-ascend` sync, automated PR publication, and opt-in fault reporting. Long paths, LF, and the GitHub credential provider are injected into **this process only** (the same pairs as `apply_enterprise_transport_env`). Do not modify user or system gitconfig files on disk (`~/.gitconfig`) during install:
    ```sh
    git --version && uv --version && gh --version
    # Append the install Git keys. Keep GIT_CONFIG_* pairs already in this process
@@ -115,10 +115,10 @@ If you are an AI Agent asked by the user to install this plugin, execute the fol
    mindie_append_git_config core.longpaths true
    mindie_append_git_config core.autocrlf false
    mindie_append_git_config "credential.https://github.com.provider" github
+   mindie_append_git_config "credential.https://github.com.helper" "!gh auth git-credential"
    unset -f mindie_append_git_config
    export GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never UV_SYSTEM_CERTS=true UV_NATIVE_TLS=true
    GH_USER=$(gh api --hostname github.com user --jq .login) && echo "GitHub channel verified for account: $GH_USER"
-   gh auth setup-git --hostname github.com
    ```
    - **Hard Gate (Never skip or silently ignore)**: If `gh` is missing or unauthenticated, follow [GitHub Sign-In](plugins/mindie-agent/skills/mindie-agent/references/github-authentication.md) first.
    - On Windows PowerShell, append the same way and skip keys that already exist. These variables apply only to the current process and its children:
@@ -137,6 +137,7 @@ If you are an AI Agent asked by the user to install this plugin, execute the fol
      Add-MindieGitConfig 'core.longpaths' 'true'
      Add-MindieGitConfig 'core.autocrlf' 'false'
      Add-MindieGitConfig 'credential.https://github.com.provider' 'github'
+     Add-MindieGitConfig 'credential.https://github.com.helper' '!gh auth git-credential'
      Remove-Item -Path Function:Add-MindieGitConfig
      ```
 
@@ -194,12 +195,58 @@ If you are an AI Agent asked by the user to install this plugin, execute the fol
    ```
    - Report the verified GitHub account (`$GH_USER`), the plugin mount path, and the profile path printed by the command above. That path follows runtime precedence and is not always `~/.config/mindie-agent/agy.json`.
 
-5. **Finish the first-run explanation, then soft-ask to Star**:
-   - Present the [Contribution Notice](plugins/mindie-agent/skills/mindie-agent/references/user-notice.md) and [Workspace Setup](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md), and let the user know they can type **`/mindie-agent help me finish first-time setup`** to activate the session lease.
-   - **Ask if the user would like to Star the main repository ⭐**: At the end of the summary, ask: *"If you found MindIE Agent helpful, would you like me to star `mindie-agent/mindie-agent` on GitHub for you? It helps the project grow! ⭐"* **Strict Consent Rule**: Only run the command if the user explicitly says yes (never run it automatically without consent):
+5. **Pop up Antigravity's native `ask_question` tool for first-time consent, GitHub Star, and workspace setup**:
+   - First inspect the current sharing status using the stdlib-only check:
      ```sh
-     gh api --hostname github.com --silent -X PUT /user/starred/mindie-agent/mindie-agent && gh api --hostname github.com --silent /user/starred/mindie-agent/mindie-agent
+     uv run --no-project --python 3.13 python "$PLUGIN_ROOT/scripts/setup.py" sharing --status
      ```
+   - Briefly present the [Contribution Notice](plugins/mindie-agent/skills/mindie-agent/references/user-notice.md) (local Gitleaks dual-layer redaction, sanitized PRs to the public knowledge repo and fault Issues to the main repo, and a single `mindie-consent.json` switch that can be disabled anytime), then **immediately call Antigravity's native `ask_question` tool** (`is_multi_select: false`, first option prefixed with `(Recommended)`; fall back to a numbered list card only if `ask_question` is unavailable) with these 3 questions:
+     ```json
+     {
+       "questions": [
+         {
+           "question": "Enable MindIE Agent community knowledge sharing and automated fault reporting (Gitleaks-redacted PRs and fault Issues)?",
+           "is_multi_select": false,
+           "options": [
+             "(Recommended) Enable Community Sharing & Fault Reporting",
+             "Keep Local-Only Mode"
+           ]
+         },
+         {
+           "question": "Would you like to star mindie-agent/mindie-agent on GitHub ⭐?",
+           "is_multi_select": false,
+           "options": [
+             "(Recommended) Star mindie-agent/mindie-agent on GitHub",
+             "Skip for now"
+           ]
+         },
+         {
+           "question": "How would you like to configure your local development workspace (vllm-ascend-workspace)?",
+           "is_multi_select": false,
+           "options": [
+             "(Recommended) Initialize vllm-ascend-workspace in current directory",
+             "Keep current directory as workspace",
+             "Use an existing workspace directory"
+           ]
+         }
+       ]
+     }
+     ```
+   - **Apply the user's choices in strict order (never enable sharing or star without explicit user consent)**:
+     1. **Resolve / initialize the workspace first (`WORKSPACE_ROOT`)**: Follow [Workspace Setup](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md) for Question 3 to determine the target absolute path `WORKSPACE_ROOT`.
+     2. **Persist the community sharing & fault reporting choice**:
+        - If the user chose to enable sharing:
+          ```sh
+          uv run --no-project --python 3.13 python "$PLUGIN_ROOT/scripts/setup.py" sharing --enable --project-root "$WORKSPACE_ROOT"
+          ```
+        - If the user chose local-only mode:
+          ```sh
+          uv run --no-project --python 3.13 python "$PLUGIN_ROOT/scripts/setup.py" sharing --disable
+          ```
+     3. **Star `mindie-agent/mindie-agent` if approved**: Only if the user selected the Star option in Question 2:
+        ```sh
+        gh api --hostname github.com --silent -X PUT /user/starred/mindie-agent/mindie-agent && gh api --hostname github.com --silent /user/starred/mindie-agent/mindie-agent
+        ```
 
 </details>
 

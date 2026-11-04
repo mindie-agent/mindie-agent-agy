@@ -33,6 +33,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -51,6 +52,7 @@ from paths import (
     config_path,
     consent_path,
     data_home,
+    diagnostics_config_path,
     engine_config_path,
     plugin_root,
     read_json,
@@ -59,6 +61,7 @@ from paths import (
 )
 
 BOOTSTRAP_TIMEOUT = 540.0
+_REPO_SLUG_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 _TEXT_SUFFIXES = {".py", ".json", ".md", ".toml", ".svg", ".txt", ".yml", ".yaml"}
 _BASELINE_ITEMS = (
     "pyproject.toml",
@@ -68,15 +71,23 @@ _BASELINE_ITEMS = (
 )
 
 
-def _discover_checkout_source() -> Path | None:
+def _discover_checkout_source(workspace_root: str | Path | None = None) -> Path | None:
     """Locate a complete `mindie-agent-agy` checkout for source baseline retention."""
-    candidates = [
-        plugin_root().parent.parent,
-        repo_root(),
-        Path(os.environ.get("TMPDIR") or tempfile.gettempdir()) / "mindie-agent-agy-install",
-        Path("/tmp/mindie-agent-agy-install"),
-        data_home() / "agy-source",
-    ]
+    candidates: list[Path] = [plugin_root().parent.parent]
+    if workspace_root is not None:
+        ws = Path(workspace_root).expanduser()
+        candidates.extend([ws, ws / "mindie-agent-agy"])
+    cwd = Path.cwd()
+    candidates.extend(
+        [
+            cwd,
+            cwd / "mindie-agent-agy",
+            repo_root(),
+            Path(os.environ.get("TMPDIR") or tempfile.gettempdir()) / "mindie-agent-agy-install",
+            Path("/tmp/mindie-agent-agy-install"),
+            data_home() / "agy-source",
+        ]
+    )
     for cand in candidates:
         try:
             resolved = cand.resolve()
@@ -95,9 +106,18 @@ def _copy_lf_clean(src: Path, dst: Path) -> None:
     dst.write_bytes(raw)
 
 
-def stage_source_baseline(source_dir: str | Path | None = None, dest_dir: str | Path | None = None) -> Path:
+def stage_source_baseline(
+    source_dir: str | Path | None = None,
+    dest_dir: str | Path | None = None,
+    *,
+    workspace_root: str | Path | None = None,
+) -> Path:
     """Persist an LF-normalized adapter source baseline under `data_home()/agy-source`."""
-    src = Path(source_dir).resolve() if source_dir is not None else _discover_checkout_source()
+    src = (
+        Path(source_dir).resolve()
+        if source_dir is not None
+        else _discover_checkout_source(workspace_root=workspace_root)
+    )
     dst = Path(dest_dir).resolve() if dest_dir is not None else (data_home() / "agy-source").resolve()
     if src is None:
         return dst if (dst / "pyproject.toml").is_file() else repo_root()
@@ -205,14 +225,24 @@ def validate_contracts() -> dict:
     root = repo_root()
     contract_file = root / "product-contract.json"
     compat_file = root / "harness-compatibility.json"
-    contract = read_json(contract_file) if contract_file.is_file() else {"native_version": "0.1.5"}
+    contract = read_json(contract_file) if contract_file.is_file() else {"native_version": "0.1.6"}
     compat = read_json(compat_file) if compat_file.is_file() else {"harness": "antigravity"}
     return dict(
         schema="mindie-candidate-check/1",
         status="validated",
         harness=compat.get("harness", "antigravity"),
-        native_version=contract.get("native_version", "0.1.5"),
+        native_version=contract.get("native_version", "0.1.6"),
     )
+
+
+def _is_temp_checkout_path(path: Path) -> bool:
+    raw = str(path).replace("\\", "/")
+    if "mindie-agent-agy-install" in raw or raw.startswith(("/tmp/", "/private/tmp/")):
+        return True
+    try:
+        return Path(tempfile.gettempdir()).resolve() in path.resolve().parents
+    except OSError:
+        return False
 
 
 def ensure_default_profile(
@@ -238,10 +268,18 @@ def ensure_default_profile(
     data_root.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     direct_root = plugin_root().parent.parent
-    if not (direct_root / "pyproject.toml").is_file() or "mindie-agent-agy-install" in str(direct_root):
-        resolved_source = stage_source_baseline()
+    is_temp_checkout = _is_temp_checkout_path(direct_root) or "mindie-agent-agy-install" in str(scripts_dir)
+    if not (direct_root / "pyproject.toml").is_file() or is_temp_checkout:
+        src_hint = direct_root if (direct_root / "pyproject.toml").is_file() else None
+        resolved_source = stage_source_baseline(src_hint, workspace_root=workspace_root)
     else:
+        stage_source_baseline(direct_root, workspace_root=workspace_root)
         resolved_source = repo_root(cfg_file)
+
+    if is_temp_checkout or "mindie-agent-agy-install" in str(scripts_dir):
+        staged_scripts = (resolved_source / "plugins" / "mindie-agent" / "scripts").resolve()
+        if staged_scripts.is_dir():
+            scripts_dir = staged_scripts
 
     validation = validate_contracts()
     gitleaks = shutil.which("gitleaks")
@@ -302,6 +340,124 @@ def ensure_default_profile(
     return adapter_payload
 
 
+def _read_optional_json(path: Path) -> tuple[str, dict]:
+    if not path.exists():
+        return "missing", {}
+    try:
+        return "ok", read_json(path)
+    except FileNotFoundError:
+        return "missing", {}
+    except ValueError:
+        return "corrupt", {}
+    except OSError:
+        return "unreadable", {}
+
+
+def sharing_status(config: str | Path | None = None) -> dict:
+    """Return current community sharing and fault reporting status using stdlib only."""
+    cfg_file = config_path(config)
+    cfile = consent_path(cfg_file)
+    comm_file = community_config_path(cfg_file)
+    diag_file = diagnostics_config_path(cfg_file)
+
+    consent_state, consent_data = _read_optional_json(cfile)
+    _, comm_data = _read_optional_json(comm_file)
+    _, diag_data = _read_optional_json(diag_file)
+
+    choice = consent_data.get("choice") if consent_state == "ok" else None
+    if consent_state == "ok" and choice not in (None, "contribute", "read-only", "later", "disabled"):
+        consent_state = "corrupt"
+        choice = None
+    choice_revision = consent_data.get("choice_revision") if consent_state == "ok" else None
+    repair_required = consent_state in {"corrupt", "unreadable"}
+    sharing_enabled = bool(comm_data.get("enabled", False)) and choice == "contribute"
+    reporting_sub = diag_data.get("reporting") if isinstance(diag_data.get("reporting"), dict) else {}
+    reporting_enabled = bool(
+        reporting_sub.get("enabled", False)
+        or diag_data.get("decision") == "enabled"
+        or diag_data.get("enabled") is True
+    )
+    needs_onboarding_prompt = (not repair_required) and (choice not in {"contribute", "disabled"})
+    return {
+        "schema": "mindie-sharing-status/1",
+        "harness": "antigravity",
+        "consent_state": consent_state,
+        "consent_choice": choice,
+        "choice_revision": choice_revision,
+        "sharing_enabled": sharing_enabled,
+        "community_enabled": sharing_enabled,
+        "reporting_enabled": reporting_enabled,
+        "repository": comm_data.get("repository", "mindie-agent/knowledge-vllm-ascend"),
+        "fork": comm_data.get("fork"),
+        "account": comm_data.get("account"),
+        "project_roots": list(comm_data.get("project_roots") or []),
+        "needs_onboarding_prompt": needs_onboarding_prompt,
+        "repair_required": repair_required,
+    }
+
+
+def _validate_sharing_inputs(
+    *,
+    repository: str,
+    visibility: str,
+    account: str | None,
+    fork: str | None,
+    project_root: str | Path | None,
+) -> Path | None:
+    if not isinstance(repository, str) or not _REPO_SLUG_RE.fullmatch(repository):
+        raise ValueError("invalid repository format; expected owner/repo")
+    if visibility != "public":
+        raise ValueError("community sharing requires visibility='public'")
+    if account is not None and (
+        not isinstance(account, str) or not account.strip() or "/" in account or any(c.isspace() for c in account)
+    ):
+        raise ValueError("invalid GitHub account name")
+    if fork is not None and (not isinstance(fork, str) or not _REPO_SLUG_RE.fullmatch(fork)):
+        raise ValueError("invalid fork format; expected owner/repo")
+    if project_root is not None:
+        return Path(project_root).expanduser().resolve()
+    return None
+
+
+def _resolve_github_fork(repository: str, account: str | None) -> tuple[str | None, str | None]:
+    gh = shutil.which("gh")
+    if not gh:
+        return account, None
+    env = apply_enterprise_transport_env(dict(os.environ))
+    resolved_account = account
+    if not resolved_account:
+        proc = bounded_run(
+            [gh, "api", "--hostname", "github.com", "user", "--jq", ".login"],
+            "",
+            timeout=10.0,
+            env=env,
+        )
+        login = (proc.stdout or "").strip()
+        if proc.returncode == 0 and login and "/" not in login and not any(c.isspace() for c in login):
+            resolved_account = login
+    if not resolved_account:
+        return None, None
+    repo_name = repository.split("/", 1)[1]
+    candidate_fork = f"{resolved_account}/{repo_name}"
+    probe = bounded_run(
+        [gh, "api", "--hostname", "github.com", f"repos/{candidate_fork}", "--jq", ".full_name"],
+        "",
+        timeout=10.0,
+        env=env,
+    )
+    if probe.returncode == 0 and (probe.stdout or "").strip():
+        return resolved_account, candidate_fork
+    fork_proc = bounded_run(
+        [gh, "repo", "fork", repository, "--clone=false"],
+        "",
+        timeout=15.0,
+        env=env,
+    )
+    if fork_proc.returncode == 0:
+        return resolved_account, candidate_fork
+    return resolved_account, None
+
+
 def configure_community(
     *,
     config: str | Path | None = None,
@@ -313,19 +469,33 @@ def configure_community(
     visibility: str = "public",
     repository: str = "mindie-agent/knowledge-vllm-ascend",
 ) -> dict:
+    resolved_root_path = _validate_sharing_inputs(
+        repository=repository,
+        visibility=visibility,
+        account=account,
+        fork=fork,
+        project_root=project_root,
+    )
+
     from mindie_knowledge import consent_store
     from mindie_knowledge.loop import settings as settings_mod
 
     cfg_file = config_path(config)
     if not cfg_file.is_file():
-        ensure_default_profile(config=cfg_file, workspace_root=project_root)
+        ensure_default_profile(config=cfg_file, workspace_root=resolved_root_path)
     comm_file = community_config_path(cfg_file)
     cfile = consent_path(cfg_file).resolve()
-    consent_store.record_choice(cfile, "contribute" if enabled else "disabled")
+    consent_info = consent_store.read(cfile)
+    if consent_info["state"] in ("corrupt", "unreadable"):
+        raise consent_store.ConsentError(
+            f"consent file is {consent_info['state']}; explicit user repair is required",
+            state=consent_info["state"],
+        )
+
     current = settings_mod.load(comm_file)
     roots = [str(p) for p in current.project_roots]
-    if project_root is not None:
-        resolved_root = str(Path(project_root).resolve())
+    if resolved_root_path is not None:
+        resolved_root = str(resolved_root_path)
         if resolved_root not in roots:
             roots.insert(0, resolved_root)
     resolved_fork = fork if fork is not None else current.raw.get("fork")
@@ -335,21 +505,55 @@ def configure_community(
         else current.raw.get("account")
         or (resolved_fork.split("/", 1)[0] if isinstance(resolved_fork, str) and "/" in resolved_fork else None)
     )
-    updated = settings_mod.write(
-        comm_file,
-        enabled=bool(enabled),
-        repository=repository,
-        project_roots=roots,
-        consent_config=str(cfile),
-        fork=resolved_fork,
-        account=resolved_account,
-        visibility=visibility,
-        remote_project_root=(
-            remote_project_root
-            if remote_project_root is not None
-            else current.raw.get("remote_project_root")
-        ),
-    )
+    if enabled and resolved_fork is None and shutil.which("gh"):
+        resolved_account, resolved_fork = _resolve_github_fork(repository, resolved_account)
+
+    if enabled:
+        updated = settings_mod.write(
+            comm_file,
+            enabled=True,
+            repository=repository,
+            project_roots=roots,
+            consent_config=str(cfile),
+            fork=resolved_fork,
+            account=resolved_account,
+            visibility=visibility,
+            remote_project_root=(
+                remote_project_root
+                if remote_project_root is not None
+                else current.raw.get("remote_project_root")
+            ),
+        )
+        consent_store.record_choice(cfile, "contribute")
+    else:
+        consent_store.record_choice(cfile, "disabled")
+        updated = settings_mod.write(
+            comm_file,
+            enabled=False,
+            repository=repository,
+            project_roots=roots,
+            consent_config=str(cfile),
+            fork=resolved_fork,
+            account=resolved_account,
+            visibility=visibility,
+            remote_project_root=(
+                remote_project_root
+                if remote_project_root is not None
+                else current.raw.get("remote_project_root")
+            ),
+        )
+
+    diag_file = diagnostics_config_path(cfg_file)
+    if hasattr(consent_store, "activate_reporting"):
+        try:
+            consent_store.activate_reporting(
+                cfile,
+                config=diag_file,
+                roots=roots or None,
+                ensure=False,
+            )
+        except Exception:
+            pass
     return updated.as_dict()
 
 
@@ -387,14 +591,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="print the init plan and exit without bootstrapping or writing files",
     )
 
-    share_p = sub.add_parser("sharing", help="record the community sharing choice")
+    share_p = sub.add_parser("sharing", help="record or inspect the community sharing choice")
     share_p.add_argument("--config", default=None)
-    share_p.add_argument("--enable", action="store_true")
-    share_p.add_argument("--disable", action="store_true")
+    mode = share_p.add_mutually_exclusive_group(required=False)
+    mode.add_argument("--status", action="store_true", help="print read-only sharing status JSON")
+    mode.add_argument("--enable", action="store_true")
+    mode.add_argument("--disable", action="store_true")
     share_p.add_argument("--fork", default=None)
+    share_p.add_argument("--account", default=None)
     share_p.add_argument("--project-root", default=None)
     share_p.add_argument("--remote-project-root", default=None)
     share_p.add_argument("--visibility", default="public")
+    share_p.add_argument("--repository", default="mindie-agent/knowledge-vllm-ascend")
     share_p.add_argument(
         "--dry-run",
         action="store_true",
@@ -441,12 +649,15 @@ def _dry_run_payload(args: argparse.Namespace) -> dict:
         payload["contracts"] = validate_contracts()
     else:
         payload["sharing"] = dict(
+            status=bool(getattr(args, "status", False)),
             enable=bool(getattr(args, "enable", False)),
             disable=bool(getattr(args, "disable", False)),
             fork=getattr(args, "fork", None),
+            account=getattr(args, "account", None),
             project_root=getattr(args, "project_root", None),
             remote_project_root=getattr(args, "remote_project_root", None),
             visibility=getattr(args, "visibility", "public"),
+            repository=getattr(args, "repository", "mindie-agent/knowledge-vllm-ascend"),
             applies_changes=False,
         )
     return payload
@@ -479,9 +690,15 @@ def main(argv: list[str] | None = None) -> int:
     # --dry-run (--dry, --dr, and similar). Those parsed options are dry-runs
     # and return before consent or config writes. Subparser defaults use
     # SUPPRESS so a parent flag placed before the subcommand is not cleared.
-    args = _build_parser().parse_args(raw_argv)
+    parser = _build_parser()
+    args = parser.parse_args(raw_argv)
+    if args.cmd == "sharing" and not (args.status or args.enable or args.disable):
+        parser.error("sharing requires one of --status, --enable, or --disable")
     if args.dry_run:
         _emit_json(_dry_run_payload(args))
+        return 0
+    if args.cmd == "sharing" and args.status:
+        _emit_json(sharing_status(args.config))
         return 0
 
     apply_enterprise_transport_env()
@@ -510,17 +727,18 @@ def main(argv: list[str] | None = None) -> int:
             domain=args.domain,
         )
     elif args.cmd == "sharing":
-        enabled = True if args.enable else False if args.disable else True
         result = configure_community(
             config=args.config,
-            enabled=enabled,
+            enabled=bool(args.enable),
             fork=args.fork,
+            account=args.account,
             project_root=args.project_root,
             remote_project_root=args.remote_project_root,
             visibility=args.visibility,
+            repository=args.repository,
         )
     else:
-        _build_parser().error("a command is required: init | sharing")
+        parser.error("a command is required: init | sharing")
     _emit_json(result)
     return 0
 
