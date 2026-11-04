@@ -92,16 +92,53 @@ If you are an AI Agent asked by the user to install this plugin, execute the fol
    **A stable, authenticated GitHub CLI (`gh`) channel is a hard requirement**—it powers plugin fetches, `knowledge-vllm-ascend` sync, automated PR publication, and opt-in fault reporting. Long paths, LF, and the GitHub credential provider are injected into **this process only** (the same pairs as `apply_enterprise_transport_env`). Do not run `git config --global` during install:
    ```sh
    git --version && uv --version && gh --version
-   export GIT_CONFIG_COUNT=3
-   export GIT_CONFIG_KEY_0=core.longpaths GIT_CONFIG_VALUE_0=true
-   export GIT_CONFIG_KEY_1=core.autocrlf GIT_CONFIG_VALUE_1=false
-   export GIT_CONFIG_KEY_2=credential.https://github.com.provider GIT_CONFIG_VALUE_2=github
+   # Append the install Git keys. Keep GIT_CONFIG_* pairs already in this process
+   # (enterprise proxy, CA, insteadOf). An existing key is left unchanged.
+   # These variables apply only to the current process and its children.
+   mindie_append_git_config() {
+     key="$1"
+     value="$2"
+     count="${GIT_CONFIG_COUNT:-0}"
+     i=0
+     while [ "$i" -lt "$count" ]; do
+       eval "cur=\${GIT_CONFIG_KEY_$i-}"
+       if [ "$cur" = "$key" ]; then
+         return 0
+       fi
+       i=$((i + 1))
+     done
+     eval "export GIT_CONFIG_KEY_$count=\"\$key\""
+     eval "export GIT_CONFIG_VALUE_$count=\"\$value\""
+     GIT_CONFIG_COUNT=$((count + 1))
+     export GIT_CONFIG_COUNT
+   }
+   mindie_append_git_config core.longpaths true
+   mindie_append_git_config core.autocrlf false
+   mindie_append_git_config "credential.https://github.com.provider" github
+   unset -f mindie_append_git_config
    export GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never UV_SYSTEM_CERTS=true UV_NATIVE_TLS=true
    GH_USER=$(gh api --hostname github.com user --jq .login) && echo "GitHub channel verified for account: $GH_USER"
    gh auth setup-git --hostname github.com
    ```
    - **Hard Gate (Never skip or silently ignore)**: If `gh` is missing or unauthenticated, follow [GitHub Sign-In](plugins/mindie-agent/skills/mindie-agent/references/github-authentication.md) first.
-   - On Windows PowerShell, set the same three keys with `$env:GIT_CONFIG_COUNT="3"` and the matching `GIT_CONFIG_KEY_*` / `GIT_CONFIG_VALUE_*` variables. They apply only to the current install process and its children.
+   - On Windows PowerShell, append the same way and skip keys that already exist. These variables apply only to the current process and its children:
+     ```powershell
+     function Add-MindieGitConfig([string]$Key, [string]$Value) {
+       $count = 0
+       if ($env:GIT_CONFIG_COUNT -match '^\d+$') { $count = [int]$env:GIT_CONFIG_COUNT }
+       for ($i = 0; $i -lt $count; $i++) {
+         $cur = (Get-Item -Path "Env:GIT_CONFIG_KEY_$i" -ErrorAction SilentlyContinue).Value
+         if ($cur -eq $Key) { return }
+       }
+       Set-Item -Path "Env:GIT_CONFIG_KEY_$count" -Value $Key
+       Set-Item -Path "Env:GIT_CONFIG_VALUE_$count" -Value $Value
+       $env:GIT_CONFIG_COUNT = [string]($count + 1)
+     }
+     Add-MindieGitConfig 'core.longpaths' 'true'
+     Add-MindieGitConfig 'core.autocrlf' 'false'
+     Add-MindieGitConfig 'credential.https://github.com.provider' 'github'
+     Remove-Item -Path Function:Add-MindieGitConfig
+     ```
 
 2. **Clone `mindie-agent-agy` and install the native plugin bundle into the workspace or user plugin directory**:
    - **Workspace installation** (recommended, mounted at `<workspace>/.agents/plugins/mindie-agent`):
@@ -123,18 +160,39 @@ If you are an AI Agent asked by the user to install this plugin, execute the fol
    UV_SYSTEM_CERTS=true UV_NATIVE_TLS=true uv run --no-project --python 3.13 python ~/.gemini/config/plugins/mindie-agent/scripts/setup.py init --workspace-root "$PWD"
    ```
    *(For workspace installation, replace the script path with `.agents/plugins/mindie-agent/scripts/setup.py`)*
-   - `setup.py --help` and `setup.py --dry-run` only print usage or a plan. They do not create `agy-venv` or write config directories. Real initialization is `init` without either flag.
+   - `setup.py --help` and `setup.py --dry-run` (and unique abbreviations argparse accepts, such as `--dry`) only print usage or a plan. They do not create `agy-venv`, record consent, or write config directories. Real initialization is `init` without those flags.
 
 4. **Light install check (do not use the full pytest suite as an install gate)**:
    Confirm the plugin manifest and default profile exist. Keep this check fast and non-destructive. The full contract suite belongs to developers and CI; see **Developer Verification** below. Do not run `pytest tests` during install.
+   A uv-managed install often has no `python3` or `python` on `PATH`. Use the bootstrapped `agy-venv` interpreter, otherwise `uv run`. Missing `hooks.json` or `mcp_config.json` must fail the check and must not print `install ok`. The profile path follows runtime `paths.config_path()`: `MINDIE_AGENT_CONFIG`, otherwise an absolute `MINDIE_CONFIG_HOME`, otherwise `~/.config/mindie-agent/agy.json`.
    ```sh
    PLUGIN_ROOT="${PLUGIN_ROOT:-$HOME/.gemini/config/plugins/mindie-agent}"
    # Workspace install: PLUGIN_ROOT="$PWD/.agents/plugins/mindie-agent"
-   test -f "$PLUGIN_ROOT/plugin.json" && test -f "$PLUGIN_ROOT/hooks.json" && test -f "$PLUGIN_ROOT/mcp_config.json"
-   PY=python3; command -v python3 >/dev/null 2>&1 || PY=python
-   "$PY" -c "import json,os,pathlib,sys; root=pathlib.Path(sys.argv[1]); manifest=json.loads((root/'plugin.json').read_text(encoding='utf-8')); assert manifest.get('name')=='mindie-agent'; cfg=pathlib.Path(os.environ.get('MINDIE_AGENT_CONFIG', pathlib.Path.home()/'.config'/'mindie-agent'/'agy.json')); profile=json.loads(cfg.read_text(encoding='utf-8')); assert profile.get('harness')=='antigravity' and profile.get('python'); print('install ok', root, cfg)" "$PLUGIN_ROOT"
+   for manifest in plugin.json hooks.json mcp_config.json; do
+     if [ ! -f "$PLUGIN_ROOT/$manifest" ]; then
+       echo "install verification failed: missing $PLUGIN_ROOT/$manifest" >&2
+       exit 1
+     fi
+   done
+   DATA_HOME="${MINDIE_DATA_HOME:-$HOME/.local/share/mindie-agent}"
+   mindie_verify_python() {
+     if [ -x "$DATA_HOME/agy-venv/bin/python" ]; then
+       "$DATA_HOME/agy-venv/bin/python" "$@"
+     elif [ -x "$DATA_HOME/agy-venv/Scripts/python.exe" ]; then
+       "$DATA_HOME/agy-venv/Scripts/python.exe" "$@"
+     elif command -v uv >/dev/null 2>&1; then
+       uv run --no-project --python 3.13 python "$@"
+     else
+       echo "install verification failed: agy-venv python and uv are both missing" >&2
+       return 127
+     fi
+   }
+   mindie_verify_python -c 'import json,os,pathlib,sys; root=pathlib.Path(sys.argv[1]); missing=[n for n in ("plugin.json","hooks.json","mcp_config.json") if not (root/n).is_file()]; missing and sys.exit("install verification failed: missing "+", ".join(missing)+f" under {root}"); manifest=json.loads((root/"plugin.json").read_text(encoding="utf-8")); manifest.get("name")=="mindie-agent" or sys.exit("install verification failed: unexpected plugin name %r"%manifest.get("name")); explicit=os.environ.get("MINDIE_AGENT_CONFIG"); home=os.environ.get("MINDIE_CONFIG_HOME"); cfg=pathlib.Path(explicit).expanduser().resolve() if explicit else (pathlib.Path(home).resolve()/"agy.json" if home and pathlib.Path(home).is_absolute() else pathlib.Path.home()/".config"/"mindie-agent"/"agy.json"); cfg.is_file() or sys.exit(f"install verification failed: cannot read profile {cfg}"); profile=json.loads(cfg.read_text(encoding="utf-8")); (profile.get("harness")=="antigravity" and profile.get("python")) or sys.exit(f"install verification failed: profile {cfg} is not an Antigravity adapter"); print("install ok", root, cfg)' "$PLUGIN_ROOT"
+   rc=$?
+   unset -f mindie_verify_python
+   [ "$rc" -eq 0 ] || exit "$rc"
    ```
-   - Report the verified GitHub account (`$GH_USER`), plugin mount path, and initialized profile (`~/.config/mindie-agent/agy.json`).
+   - Report the verified GitHub account (`$GH_USER`), the plugin mount path, and the profile path printed by the command above. That path follows runtime precedence and is not always `~/.config/mindie-agent/agy.json`.
 
 5. **Finish the first-run explanation, then soft-ask to Star**:
    - Present the [Contribution Notice](plugins/mindie-agent/skills/mindie-agent/references/user-notice.md) and [Workspace Setup](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md), and let the user know they can type **`/mindie-agent help me finish first-time setup`** to activate the session lease.

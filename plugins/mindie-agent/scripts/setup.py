@@ -22,6 +22,8 @@ the persistent component virtualenv (`agy-venv`) and LF-normalized source baseli
   `agy-venv` under `data_home()` when bootstrapping.
 - `--help` / `-h` and `--dry-run` are read-only: they do not stage source,
   create `agy-venv`, import `mindie_knowledge`, or write config directories.
+  Unique abbreviations that argparse accepts (`--dry`, `--dr`, and similar)
+  take that same read-only path and never record consent.
 """
 
 from __future__ import annotations
@@ -360,7 +362,9 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Configure MindIE Agent for Antigravity",
         epilog=(
             "Read-only: --help and --dry-run print usage or a plan and exit. "
-            "They do not bootstrap agy-venv or write config directories."
+            "Unique abbreviations argparse accepts, such as --dry, are the same "
+            "read-only plan. They do not bootstrap agy-venv, record consent, "
+            "or write config directories."
         ),
     )
     parser.add_argument(
@@ -374,9 +378,12 @@ def _build_parser() -> argparse.ArgumentParser:
     init_p.add_argument("--config", default=None)
     init_p.add_argument("--workspace-root", default=None)
     init_p.add_argument("--domain", default="vllm-ascend")
+    # SUPPRESS so a parent flag before the subcommand is kept. store_true's
+    # default False would otherwise clear `--dry-run init` and `--dry sharing`.
     init_p.add_argument(
         "--dry-run",
         action="store_true",
+        default=argparse.SUPPRESS,
         help="print the init plan and exit without bootstrapping or writing files",
     )
 
@@ -391,6 +398,7 @@ def _build_parser() -> argparse.ArgumentParser:
     share_p.add_argument(
         "--dry-run",
         action="store_true",
+        default=argparse.SUPPRESS,
         help="print the sharing plan and exit without recording consent",
     )
     return parser
@@ -466,14 +474,13 @@ def main(argv: list[str] | None = None) -> int:
         _build_parser().parse_args(raw_argv)
         return 0
 
-    dry_run = "--dry-run" in raw_argv
-    parse_argv = [arg for arg in raw_argv if arg != "--dry-run"]
-    if not parse_argv:
-        parse_argv = ["init"]
-    # Parse before any runtime bootstrap so usage errors, --help, and --dry-run
-    # cannot stage agy-source or create agy-venv.
-    args = _build_parser().parse_args(parse_argv)
-    if dry_run:
+    # Parse before any runtime bootstrap so usage errors cannot stage
+    # agy-source or create agy-venv. argparse accepts unique prefixes of
+    # --dry-run (--dry, --dr, and similar). Those parsed options are dry-runs
+    # and return before consent or config writes. Subparser defaults use
+    # SUPPRESS so a parent flag placed before the subcommand is not cleared.
+    args = _build_parser().parse_args(raw_argv)
+    if args.dry_run:
         _emit_json(_dry_run_payload(args))
         return 0
 

@@ -92,16 +92,52 @@ MindIE Agent 采用**「领域知识与 Skill 手动按需触发 + 远端开发�
    **稳定的 GitHub 交互通道（已安装并登录 `gh` CLI）是硬性前置指标**——插件拉取、`knowledge-vllm-ascend` 同步、经验闭环自动提交 PR 及组件故障上报均依赖该通道。长路径、LF 与 GitHub 凭据提供方只注入**当前进程**（与 `apply_enterprise_transport_env` 相同），安装过程禁止执行 `git config --global`：
    ```sh
    git --version && uv --version && gh --version
-   export GIT_CONFIG_COUNT=3
-   export GIT_CONFIG_KEY_0=core.longpaths GIT_CONFIG_VALUE_0=true
-   export GIT_CONFIG_KEY_1=core.autocrlf GIT_CONFIG_VALUE_1=false
-   export GIT_CONFIG_KEY_2=credential.https://github.com.provider GIT_CONFIG_VALUE_2=github
+   # 追加安装所需的 Git 键，保留进程里已有的 GIT_CONFIG_*（企业代理、CA、insteadOf）。
+   # 某个键已经存在时不覆盖它的值。这些变量只作用于当前进程及其子进程。
+   mindie_append_git_config() {
+     key="$1"
+     value="$2"
+     count="${GIT_CONFIG_COUNT:-0}"
+     i=0
+     while [ "$i" -lt "$count" ]; do
+       eval "cur=\${GIT_CONFIG_KEY_$i-}"
+       if [ "$cur" = "$key" ]; then
+         return 0
+       fi
+       i=$((i + 1))
+     done
+     eval "export GIT_CONFIG_KEY_$count=\"\$key\""
+     eval "export GIT_CONFIG_VALUE_$count=\"\$value\""
+     GIT_CONFIG_COUNT=$((count + 1))
+     export GIT_CONFIG_COUNT
+   }
+   mindie_append_git_config core.longpaths true
+   mindie_append_git_config core.autocrlf false
+   mindie_append_git_config "credential.https://github.com.provider" github
+   unset -f mindie_append_git_config
    export GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never UV_SYSTEM_CERTS=true UV_NATIVE_TLS=true
    GH_USER=$(gh api --hostname github.com user --jq .login) && echo "GitHub channel verified for account: $GH_USER"
    gh auth setup-git --hostname github.com
    ```
    - **硬性门禁（严禁跳过或静默忽略）**：若未安装 `gh` 或未登录，请按 [GitHub 登录引导](plugins/mindie-agent/skills/mindie-agent/references/github-authentication.md) 协助完成认证。
-   - Windows PowerShell 用 `$env:GIT_CONFIG_COUNT="3"`（以及对应的 `GIT_CONFIG_KEY_*` / `GIT_CONFIG_VALUE_*`）设置同样三个键。这些变量只作用于当前安装进程及其子进程。
+   - Windows PowerShell 同样只追加、不重写已有 `GIT_CONFIG_*`（已有同名键则跳过）。这些变量只作用于当前进程及其子进程：
+     ```powershell
+     function Add-MindieGitConfig([string]$Key, [string]$Value) {
+       $count = 0
+       if ($env:GIT_CONFIG_COUNT -match '^\d+$') { $count = [int]$env:GIT_CONFIG_COUNT }
+       for ($i = 0; $i -lt $count; $i++) {
+         $cur = (Get-Item -Path "Env:GIT_CONFIG_KEY_$i" -ErrorAction SilentlyContinue).Value
+         if ($cur -eq $Key) { return }
+       }
+       Set-Item -Path "Env:GIT_CONFIG_KEY_$count" -Value $Key
+       Set-Item -Path "Env:GIT_CONFIG_VALUE_$count" -Value $Value
+       $env:GIT_CONFIG_COUNT = [string]($count + 1)
+     }
+     Add-MindieGitConfig 'core.longpaths' 'true'
+     Add-MindieGitConfig 'core.autocrlf' 'false'
+     Add-MindieGitConfig 'credential.https://github.com.provider' 'github'
+     Remove-Item -Path Function:Add-MindieGitConfig
+     ```
 
 2. **克隆 `mindie-agent-agy` 并将原生插件包安装到用户全局或当前工作区插件目录**：
    - **工作区级安装**（推荐用于项目隔离，挂载到 `<workspace>/.agents/plugins/mindie-agent`）：
@@ -123,18 +159,39 @@ MindIE Agent 采用**「领域知识与 Skill 手动按需触发 + 远端开发�
    UV_SYSTEM_CERTS=true UV_NATIVE_TLS=true uv run --no-project --python 3.13 python ~/.gemini/config/plugins/mindie-agent/scripts/setup.py init --workspace-root "$PWD"
    ```
    *(若采用工作区级安装，将脚本路径替换为 `.agents/plugins/mindie-agent/scripts/setup.py`)*
-   - `setup.py --help` 与 `setup.py --dry-run` 只打印说明或计划，不会创建 `agy-venv`，也不会写入配置目录。真正初始化使用不带这两个参数的 `init`。
+   - `setup.py --help` 与 `setup.py --dry-run`（以及 argparse 会接受的唯一缩写，例如 `--dry`）只打印说明或计划，不会创建 `agy-venv`，也不会写入配置或同意记录。真正初始化使用不带这些参数的 `init`。
 
 4. **轻量核验安装结果（不要把全量 pytest 当作安装门禁）**：
    只确认插件清单与默认 Profile 已落盘。安装核验必须保持快速、非破坏性。全量契约测试属于开发者与 CI，见下文「开发者验证与测试」，安装时不要运行 `pytest tests`。
+   `uv` 管理的安装经常在 PATH 上没有 `python3` / `python`。解释器优先用已自举的 `agy-venv`，否则用 `uv run`。`hooks.json` 或 `mcp_config.json` 缺失时核验必须失败，不能打印 `install ok`。Profile 路径与运行时 `paths.config_path()` 相同：`MINDIE_AGENT_CONFIG`，否则绝对路径的 `MINDIE_CONFIG_HOME`，否则 `~/.config/mindie-agent/agy.json`。
    ```sh
    PLUGIN_ROOT="${PLUGIN_ROOT:-$HOME/.gemini/config/plugins/mindie-agent}"
    # 工作区安装时改为：PLUGIN_ROOT="$PWD/.agents/plugins/mindie-agent"
-   test -f "$PLUGIN_ROOT/plugin.json" && test -f "$PLUGIN_ROOT/hooks.json" && test -f "$PLUGIN_ROOT/mcp_config.json"
-   PY=python3; command -v python3 >/dev/null 2>&1 || PY=python
-   "$PY" -c "import json,os,pathlib,sys; root=pathlib.Path(sys.argv[1]); manifest=json.loads((root/'plugin.json').read_text(encoding='utf-8')); assert manifest.get('name')=='mindie-agent'; cfg=pathlib.Path(os.environ.get('MINDIE_AGENT_CONFIG', pathlib.Path.home()/'.config'/'mindie-agent'/'agy.json')); profile=json.loads(cfg.read_text(encoding='utf-8')); assert profile.get('harness')=='antigravity' and profile.get('python'); print('install ok', root, cfg)" "$PLUGIN_ROOT"
+   for manifest in plugin.json hooks.json mcp_config.json; do
+     if [ ! -f "$PLUGIN_ROOT/$manifest" ]; then
+       echo "install verification failed: missing $PLUGIN_ROOT/$manifest" >&2
+       exit 1
+     fi
+   done
+   DATA_HOME="${MINDIE_DATA_HOME:-$HOME/.local/share/mindie-agent}"
+   mindie_verify_python() {
+     if [ -x "$DATA_HOME/agy-venv/bin/python" ]; then
+       "$DATA_HOME/agy-venv/bin/python" "$@"
+     elif [ -x "$DATA_HOME/agy-venv/Scripts/python.exe" ]; then
+       "$DATA_HOME/agy-venv/Scripts/python.exe" "$@"
+     elif command -v uv >/dev/null 2>&1; then
+       uv run --no-project --python 3.13 python "$@"
+     else
+       echo "install verification failed: agy-venv python and uv are both missing" >&2
+       return 127
+     fi
+   }
+   mindie_verify_python -c 'import json,os,pathlib,sys; root=pathlib.Path(sys.argv[1]); missing=[n for n in ("plugin.json","hooks.json","mcp_config.json") if not (root/n).is_file()]; missing and sys.exit("install verification failed: missing "+", ".join(missing)+f" under {root}"); manifest=json.loads((root/"plugin.json").read_text(encoding="utf-8")); manifest.get("name")=="mindie-agent" or sys.exit("install verification failed: unexpected plugin name %r"%manifest.get("name")); explicit=os.environ.get("MINDIE_AGENT_CONFIG"); home=os.environ.get("MINDIE_CONFIG_HOME"); cfg=pathlib.Path(explicit).expanduser().resolve() if explicit else (pathlib.Path(home).resolve()/"agy.json" if home and pathlib.Path(home).is_absolute() else pathlib.Path.home()/".config"/"mindie-agent"/"agy.json"); cfg.is_file() or sys.exit(f"install verification failed: cannot read profile {cfg}"); profile=json.loads(cfg.read_text(encoding="utf-8")); (profile.get("harness")=="antigravity" and profile.get("python")) or sys.exit(f"install verification failed: profile {cfg} is not an Antigravity adapter"); print("install ok", root, cfg)' "$PLUGIN_ROOT"
+   rc=$?
+   unset -f mindie_verify_python
+   [ "$rc" -eq 0 ] || exit "$rc"
    ```
-   - 向用户汇报已验证的 GitHub 账号（`$GH_USER`）、插件挂载路径以及默认 Profile（`~/.config/mindie-agent/agy.json`）初始化状态。
+   - 向用户汇报已验证的 GitHub 账号（`$GH_USER`）、插件挂载路径，以及上面命令打印出来的 Profile 路径。该路径遵守运行时优先级，不总是 `~/.config/mindie-agent/agy.json`。
 
 5. **完成首次说明，并在安装成功后软询问 Star**：
    - 介绍 [用户须知](plugins/mindie-agent/skills/mindie-agent/references/user-notice.md) 与 [工作区配置指南](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md)，并提示用户输入 **`/mindie-agent 帮我完成首次配置`** 即可启用领域知识与 Skill 引导。
