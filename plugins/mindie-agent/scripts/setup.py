@@ -20,6 +20,8 @@ the persistent component virtualenv (`agy-venv`) and LF-normalized source baseli
 - Writes `agy.json`, `agy.engine.json`, `mindie-community.json`, and
   `mindie-consent.json` under `config_home()`, and stages `agy-source` /
   `agy-venv` under `data_home()` when bootstrapping.
+- `--help` / `-h` and `--dry-run` are read-only: they do not stage source,
+  create `agy-venv`, import `mindie_knowledge`, or write config directories.
 """
 
 from __future__ import annotations
@@ -349,6 +351,99 @@ def configure_community(
     return updated.as_dict()
 
 
+def _requests_help(argv: list[str]) -> bool:
+    return any(arg in {"-h", "--help"} or arg.startswith("--help=") for arg in argv)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Configure MindIE Agent for Antigravity",
+        epilog=(
+            "Read-only: --help and --dry-run print usage or a plan and exit. "
+            "They do not bootstrap agy-venv or write config directories."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the setup plan and exit without bootstrapping a runtime or writing directories",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=False)
+
+    init_p = sub.add_parser("init", help="write the passive default adapter profile")
+    init_p.add_argument("--config", default=None)
+    init_p.add_argument("--workspace-root", default=None)
+    init_p.add_argument("--domain", default="vllm-ascend")
+    init_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the init plan and exit without bootstrapping or writing files",
+    )
+
+    share_p = sub.add_parser("sharing", help="record the community sharing choice")
+    share_p.add_argument("--config", default=None)
+    share_p.add_argument("--enable", action="store_true")
+    share_p.add_argument("--disable", action="store_true")
+    share_p.add_argument("--fork", default=None)
+    share_p.add_argument("--project-root", default=None)
+    share_p.add_argument("--remote-project-root", default=None)
+    share_p.add_argument("--visibility", default="public")
+    share_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the sharing plan and exit without recording consent",
+    )
+    return parser
+
+
+def _emit_json(payload: dict) -> None:
+    sys.stdout.buffer.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+    sys.stdout.buffer.flush()
+
+
+def _dry_run_payload(args: argparse.Namespace) -> dict:
+    """Describe what a real invocation would touch. Performs no writes."""
+    cfg = config_path(getattr(args, "config", None))
+    knowledge_present = importlib.util.find_spec("mindie_knowledge") is not None
+    venv_name = "Scripts/python.exe" if os.name == "nt" else "bin/python"
+    cmd = args.cmd or "init"
+    payload = dict(
+        schema="mindie-agy-setup-plan/1",
+        status="dry-run",
+        cmd=cmd,
+        harness="antigravity",
+        python=sys.version.split()[0],
+        uv=shutil.which("uv"),
+        mindie_knowledge_importable=knowledge_present,
+        would_bootstrap_runtime=not knowledge_present,
+        writes=[],
+        paths=dict(
+            config_file=str(cfg),
+            engine_config=str(cfg.with_name(cfg.stem + ".engine.json")),
+            community_config=str(cfg.parent / "mindie-community.json"),
+            consent_config=str(cfg.parent / "mindie-consent.json"),
+            data_home=str(data_home()),
+            source_baseline=str(data_home() / "agy-source"),
+            venv_python=str(data_home() / "agy-venv" / venv_name),
+        ),
+    )
+    if cmd == "init":
+        payload["domain"] = getattr(args, "domain", "vllm-ascend")
+        payload["workspace_root"] = getattr(args, "workspace_root", None)
+        payload["contracts"] = validate_contracts()
+    else:
+        payload["sharing"] = dict(
+            enable=bool(getattr(args, "enable", False)),
+            disable=bool(getattr(args, "disable", False)),
+            fork=getattr(args, "fork", None),
+            project_root=getattr(args, "project_root", None),
+            remote_project_root=getattr(args, "remote_project_root", None),
+            visibility=getattr(args, "visibility", "public"),
+            applies_changes=False,
+        )
+    return payload
+
+
 def _reexec_stdio(stream):
     try:
         if os.name == "nt":
@@ -364,10 +459,25 @@ def _reexec_stdio(stream):
 
 
 def main(argv: list[str] | None = None) -> int:
-    apply_enterprise_transport_env()
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if not raw_argv:
         raw_argv = ["init"]
+    if _requests_help(raw_argv):
+        _build_parser().parse_args(raw_argv)
+        return 0
+
+    dry_run = "--dry-run" in raw_argv
+    parse_argv = [arg for arg in raw_argv if arg != "--dry-run"]
+    if not parse_argv:
+        parse_argv = ["init"]
+    # Parse before any runtime bootstrap so usage errors, --help, and --dry-run
+    # cannot stage agy-source or create agy-venv.
+    args = _build_parser().parse_args(parse_argv)
+    if dry_run:
+        _emit_json(_dry_run_payload(args))
+        return 0
+
+    apply_enterprise_transport_env()
     if (
         importlib.util.find_spec("mindie_knowledge") is None
         and os.environ.get("_MINDIE_AGY_SETUP_BOOTSTRAPPED") != "1"
@@ -386,31 +496,13 @@ def main(argv: list[str] | None = None) -> int:
         proc = subprocess.run([target_py, "-I", str(Path(__file__).resolve()), *raw_argv], **run_kwargs)
         return int(proc.returncode)
 
-    parser = argparse.ArgumentParser(description="Configure MindIE Agent for Antigravity")
-    sub = parser.add_subparsers(dest="cmd", required=True)
-
-    init_p = sub.add_parser("init")
-    init_p.add_argument("--config", default=None)
-    init_p.add_argument("--workspace-root", default=None)
-    init_p.add_argument("--domain", default="vllm-ascend")
-
-    share_p = sub.add_parser("sharing")
-    share_p.add_argument("--config", default=None)
-    share_p.add_argument("--enable", action="store_true")
-    share_p.add_argument("--disable", action="store_true")
-    share_p.add_argument("--fork", default=None)
-    share_p.add_argument("--project-root", default=None)
-    share_p.add_argument("--remote-project-root", default=None)
-    share_p.add_argument("--visibility", default="public")
-
-    args = parser.parse_args(raw_argv)
     if args.cmd == "init":
         result = ensure_default_profile(
             config=args.config,
             workspace_root=args.workspace_root,
             domain=args.domain,
         )
-    else:
+    elif args.cmd == "sharing":
         enabled = True if args.enable else False if args.disable else True
         result = configure_community(
             config=args.config,
@@ -420,8 +512,9 @@ def main(argv: list[str] | None = None) -> int:
             remote_project_root=args.remote_project_root,
             visibility=args.visibility,
         )
-    sys.stdout.buffer.write((json.dumps(result, ensure_ascii=False) + "\n").encode("utf-8"))
-    sys.stdout.buffer.flush()
+    else:
+        _build_parser().error("a command is required: init | sharing")
+    _emit_json(result)
     return 0
 
 

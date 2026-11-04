@@ -89,15 +89,19 @@ Please install https://github.com/mindie-agent/mindie-agent-agy for me
 If you are an AI Agent asked by the user to install this plugin, execute the following deterministic steps directly in the terminal **without asking the user to read the documentation manually**:
 
 1. **Check prerequisites and the `gh` GitHub channel (Hard Requirement)**:
-   **A stable, authenticated GitHub CLI (`gh`) channel is a hard requirement**—it powers plugin fetches, `knowledge-vllm-ascend` sync, automated PR publication, and opt-in fault reporting:
+   **A stable, authenticated GitHub CLI (`gh`) channel is a hard requirement**—it powers plugin fetches, `knowledge-vllm-ascend` sync, automated PR publication, and opt-in fault reporting. Long paths, LF, and the GitHub credential provider are injected into **this process only** (the same pairs as `apply_enterprise_transport_env`). Do not run `git config --global` during install:
    ```sh
    git --version && uv --version && gh --version
-   git config --global core.longpaths true && git config --global core.autocrlf false
-   git config --global credential.https://github.com.provider github
+   export GIT_CONFIG_COUNT=3
+   export GIT_CONFIG_KEY_0=core.longpaths GIT_CONFIG_VALUE_0=true
+   export GIT_CONFIG_KEY_1=core.autocrlf GIT_CONFIG_VALUE_1=false
+   export GIT_CONFIG_KEY_2=credential.https://github.com.provider GIT_CONFIG_VALUE_2=github
+   export GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never UV_SYSTEM_CERTS=true UV_NATIVE_TLS=true
    GH_USER=$(gh api --hostname github.com user --jq .login) && echo "GitHub channel verified for account: $GH_USER"
    gh auth setup-git --hostname github.com
    ```
    - **Hard Gate (Never skip or silently ignore)**: If `gh` is missing or unauthenticated, follow [GitHub Sign-In](plugins/mindie-agent/skills/mindie-agent/references/github-authentication.md) first.
+   - On Windows PowerShell, set the same three keys with `$env:GIT_CONFIG_COUNT="3"` and the matching `GIT_CONFIG_KEY_*` / `GIT_CONFIG_VALUE_*` variables. They apply only to the current install process and its children.
 
 2. **Clone `mindie-agent-agy` and install the native plugin bundle into the workspace or user plugin directory**:
    - **Workspace installation** (recommended, mounted at `<workspace>/.agents/plugins/mindie-agent`):
@@ -114,18 +118,30 @@ If you are an AI Agent asked by the user to install this plugin, execute the fol
      cp -R mindie-agent-agy/plugins/mindie-agent/. ~/.gemini/plugins/mindie-agent/
      ```
 
-3. **Bootstrap the component runtime and initialize the default adapter profile (passive default, with enterprise proxy system TLS and Windows longpath settings)**:
+3. **Bootstrap the component runtime and initialize the default adapter profile (passive default; enterprise TLS and Git long-path/LF/credential-provider settings come from the process environment, not global Git config)**:
    ```sh
    UV_SYSTEM_CERTS=true UV_NATIVE_TLS=true uv run --no-project --python 3.13 python ~/.gemini/config/plugins/mindie-agent/scripts/setup.py init --workspace-root "$PWD"
    ```
    *(For workspace installation, replace the script path with `.agents/plugins/mindie-agent/scripts/setup.py`)*
+   - `setup.py --help` and `setup.py --dry-run` only print usage or a plan. They do not create `agy-venv` or write config directories. Real initialization is `init` without either flag.
 
-4. **Verify plugin installation and contract tests**:
+4. **Light install check (do not use the full pytest suite as an install gate)**:
+   Confirm the plugin manifest and default profile exist. Keep this check fast and non-destructive. The full contract suite belongs to developers and CI; see **Developer Verification** below. Do not run `pytest tests` during install.
    ```sh
-   ~/.local/share/mindie-agent/agy-venv/bin/python -m pytest mindie-agent-agy/tests -q
+   PLUGIN_ROOT="${PLUGIN_ROOT:-$HOME/.gemini/config/plugins/mindie-agent}"
+   # Workspace install: PLUGIN_ROOT="$PWD/.agents/plugins/mindie-agent"
+   test -f "$PLUGIN_ROOT/plugin.json" && test -f "$PLUGIN_ROOT/hooks.json" && test -f "$PLUGIN_ROOT/mcp_config.json"
+   PY=python3; command -v python3 >/dev/null 2>&1 || PY=python
+   "$PY" -c "import json,os,pathlib,sys; root=pathlib.Path(sys.argv[1]); manifest=json.loads((root/'plugin.json').read_text(encoding='utf-8')); assert manifest.get('name')=='mindie-agent'; cfg=pathlib.Path(os.environ.get('MINDIE_AGENT_CONFIG', pathlib.Path.home()/'.config'/'mindie-agent'/'agy.json')); profile=json.loads(cfg.read_text(encoding='utf-8')); assert profile.get('harness')=='antigravity' and profile.get('python'); print('install ok', root, cfg)" "$PLUGIN_ROOT"
    ```
-   *(On Windows, the interpreter is `~/.local/share/mindie-agent/agy-venv/Scripts/python.exe`)*
-   - Report the verified GitHub account (`$GH_USER`), plugin mount path, and initialized profile (`~/.config/mindie-agent/agy.json`), then present the [Contribution Notice](plugins/mindie-agent/skills/mindie-agent/references/user-notice.md) and [Workspace Setup](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md), and let the user know they can type **`/mindie-agent help me finish first-time setup`** to activate the session lease.
+   - Report the verified GitHub account (`$GH_USER`), plugin mount path, and initialized profile (`~/.config/mindie-agent/agy.json`).
+
+5. **Finish the first-run explanation, then soft-ask to Star**:
+   - Present the [Contribution Notice](plugins/mindie-agent/skills/mindie-agent/references/user-notice.md) and [Workspace Setup](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md), and let the user know they can type **`/mindie-agent help me finish first-time setup`** to activate the session lease.
+   - **Ask if the user would like to Star the main repository ⭐**: At the end of the summary, ask: *"If you found MindIE Agent helpful, would you like me to star `mindie-agent/mindie-agent` on GitHub for you? It helps the project grow! ⭐"* **Strict Consent Rule**: Only run the command if the user explicitly says yes (never run it automatically without consent):
+     ```sh
+     gh api --hostname github.com --silent -X PUT /user/starred/mindie-agent/mindie-agent && gh api --hostname github.com --silent /user/starred/mindie-agent/mindie-agent
+     ```
 
 </details>
 
