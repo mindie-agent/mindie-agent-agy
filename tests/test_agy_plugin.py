@@ -330,4 +330,107 @@ def test_init_still_bootstraps_when_knowledge_is_missing(monkeypatch):
     assert seen["argv"][-3:] == ["init", "--workspace-root", "/tmp/workspace"]
 
 
+def test_abbreviated_dry_run_never_writes_consent_or_config(tmp_path, monkeypatch, capsys):
+    """Argparse treats --dry as --dry-run. That preview must not bootstrap or record consent."""
+    import setup
+
+    calls: list[str] = []
+
+    def reject(name):
+        def _inner(*_args, **_kwargs):
+            calls.append(name)
+            raise AssertionError(name)
+
+        return _inner
+
+    monkeypatch.setattr(setup, "configure_community", reject("configure_community"))
+    monkeypatch.setattr(setup, "ensure_default_profile", reject("ensure_default_profile"))
+    monkeypatch.setattr(setup, "stage_source_baseline", reject("stage_source_baseline"))
+    monkeypatch.setattr(setup, "ensure_runtime_python", reject("ensure_runtime_python"))
+    monkeypatch.setattr(setup.subprocess, "run", reject("subprocess.run"))
+
+    accepted = (
+        ["--dry"],
+        ["--dr"],
+        ["--dry-r"],
+        ["--dry-ru"],
+        ["--d"],
+        ["--dry-run", "init"],
+        ["--dry", "init", "--domain", "vllm-ascend"],
+        ["init", "--dry", "--workspace-root", str(tmp_path), "--domain", "demo"],
+        ["init", "--dr"],
+        ["sharing", "--dry", "--enable"],
+        ["sharing", "--dry-r", "--enable"],
+        ["sharing", "--dr", "--enable", "--fork", "user/knowledge-vllm-ascend"],
+        ["sharing", "--enable", "--dry"],
+        ["--dry", "sharing", "--enable"],
+        ["--dr", "sharing", "--disable"],
+        ["--dry-run", "sharing", "--enable"],
+    )
+    for argv in accepted:
+        assert setup.main(list(argv)) == 0, argv
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "dry-run", argv
+        assert payload["writes"] == [], argv
+        if "sharing" in argv:
+            assert payload["cmd"] == "sharing", argv
+            assert payload["sharing"]["applies_changes"] is False
+            if "--enable" in argv:
+                assert payload["sharing"]["enable"] is True
+            if "--disable" in argv:
+                assert payload["sharing"]["disable"] is True
+        elif "init" not in argv:
+            assert payload["cmd"] == "init", argv
+
+    for argv in (
+        ["init", "--d"],
+        ["sharing", "--d", "--enable"],
+        ["sharing", "--dry=true", "--enable"],
+        ["init", "--domain", "--dry"],
+        ["sharing", "--fork", "--dry"],
+    ):
+        with pytest.raises(SystemExit) as exc:
+            setup.main(argv)
+        assert exc.value.code == 2, argv
+        capsys.readouterr()
+
+    cfg = Path(os.environ["MINDIE_AGENT_CONFIG"])
+    data = Path(os.environ["MINDIE_DATA_HOME"])
+    assert calls == []
+    assert not cfg.exists()
+    assert not (cfg.parent / "mindie-consent.json").exists()
+    assert not (cfg.parent / "mindie-community.json").exists()
+    assert not (cfg.parent / "agy.engine.json").exists()
+    assert not (data / "agy-venv").exists()
+    assert not (data / "agy-source").exists()
+
+    def record_sharing(**kwargs):
+        calls.append("configure_community")
+        return {"schema": "mindie-community-config/1", "enabled": kwargs["enabled"]}
+
+    monkeypatch.setattr(setup, "configure_community", record_sharing)
+    monkeypatch.setenv("_MINDIE_AGY_SETUP_BOOTSTRAPPED", "1")
+    assert setup.main(["sharing", "--disable"]) == 0
+    recorded = json.loads(capsys.readouterr().out)
+    assert recorded["enabled"] is False
+    assert calls == ["configure_community"]
+    assert not (cfg.parent / "mindie-consent.json").exists()
+
+    _hide_mindie_knowledge(monkeypatch)
+    monkeypatch.setattr(setup, "configure_community", reject("configure_community"))
+    monkeypatch.setattr(setup, "stage_source_baseline", reject("stage_source_baseline"))
+    monkeypatch.setattr(setup, "ensure_runtime_python", reject("ensure_runtime_python"))
+    calls.clear()
+    assert setup.main(["sharing", "--dry", "--enable"]) == 0
+    hidden = json.loads(capsys.readouterr().out)
+    assert hidden["status"] == "dry-run"
+    assert hidden["would_bootstrap_runtime"] is True
+    assert hidden["writes"] == []
+    assert hidden["sharing"]["enable"] is True
+    assert hidden["sharing"]["applies_changes"] is False
+    assert calls == []
+    assert not cfg.exists()
+    assert not (cfg.parent / "mindie-consent.json").exists()
+
+
 
