@@ -194,7 +194,7 @@ MindIE Agent 采用**「领域知识与 Skill 手动按需触发 + 远端开发�
    ```
    - 向用户汇报已验证的 GitHub 账号（`$GH_USER`）、插件挂载路径，以及上面命令打印出来的 Profile 路径。该路径遵守运行时优先级，不总是 `~/.config/mindie-agent/agy.json`。
 
-5. **调用 Antigravity 原生 `ask_question` 工具弹出交互式单选框完成首次授权与工作区配置**：
+5. **调用 Antigravity 原生 `ask_question` 工具弹出交互式单选框完成工作区、社区共享与 Star 引导**：
    - 先用纯标准库命令检查当前授权状态：
      ```sh
      uv run --no-project --python 3.13 python "$PLUGIN_ROOT/scripts/setup.py" sharing --status
@@ -204,45 +204,45 @@ MindIE Agent 采用**「领域知识与 Skill 手动按需触发 + 远端开发�
      {
        "questions": [
          {
-           "question": "是否开启 MindIE Agent 社区知识共享与自动故障上报（本地 Gitleaks 脱敏后向开源社区提交经验 PR 与故障 Issue）？",
-           "is_multi_select": false,
-           "options": [
-             "(Recommended) Enable Community Sharing & Fault Reporting",
-             "Keep Local-Only Mode"
-           ]
-         },
-         {
-           "question": "是否为 MindIE Agent 开源主仓 (mindie-agent/mindie-agent) 点亮 GitHub Star ⭐？",
-           "is_multi_select": false,
-           "options": [
-             "(Recommended) Star mindie-agent/mindie-agent on GitHub",
-             "Skip for now"
-           ]
-         },
-         {
            "question": "如何配置本地开发工作区 vllm-ascend-workspace？",
            "is_multi_select": false,
            "options": [
-             "(Recommended) Initialize vllm-ascend-workspace in current directory",
-             "Keep current directory as workspace",
-             "Use an existing workspace directory"
+             "(Recommended) 在当前目录初始化 vllm-ascend-workspace",
+             "继续使用当前目录作为工作区",
+             "指定已有工作区目录"
+           ]
+         },
+         {
+           "question": "是否开启 MindIE Agent 社区知识共享与自动故障上报（本地 Gitleaks 脱敏后向开源社区提交经验 PR 与故障 Issue）？",
+           "is_multi_select": false,
+           "options": [
+             "(Recommended) 开启社区共享与故障上报",
+             "仅保持本地模式"
+           ]
+         },
+         {
+           "question": "顺手给 MindIE Agent 点个 GitHub Star 吗？ ⭐",
+           "is_multi_select": false,
+           "options": [
+             "(Recommended) 好，点个 Star ⭐（在 GitHub 上 star mindie-agent/mindie-agent 支持一下项目）",
+             "先不用（直接开始使用）"
            ]
          }
        ]
      }
      ```
    - **严格按序执行用户回答（严禁未经用户同意静默开启或点 Star）**：
-     1. **先确定/初始化工作区（得到 `WORKSPACE_ROOT`）**：按 [工作区配置指南](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md) 处理问题 3，解析出最终工作区绝对路径 `WORKSPACE_ROOT`。
+     1. **先确定/初始化工作区（得到 `WORKSPACE_ROOT`）**：按 [工作区配置指南](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md) 处理问题 1，解析出最终工作区绝对路径 `WORKSPACE_ROOT`。
      2. **再落盘社区共享与故障上报开关**：
-        - 若问题 1 选择开启：
+        - 若问题 2 选择开启：
           ```sh
           uv run --no-project --python 3.13 python "$PLUGIN_ROOT/scripts/setup.py" sharing --enable --project-root "$WORKSPACE_ROOT"
           ```
-        - 若问题 1 选择仅本地模式：
+        - 若问题 2 选择仅保持本地模式：
           ```sh
           uv run --no-project --python 3.13 python "$PLUGIN_ROOT/scripts/setup.py" sharing --disable
           ```
-     3. **最后按需点亮 GitHub Star ⭐**：仅当问题 2 明确选择点亮 Star 时执行：
+     3. **最后按用户意愿点上 GitHub Star ⭐**：仅当问题 3 明确选择点个 Star 时执行：
         ```sh
         gh api --hostname github.com --silent -X PUT /user/starred/mindie-agent/mindie-agent && gh api --hostname github.com --silent /user/starred/mindie-agent/mindie-agent
         ```
