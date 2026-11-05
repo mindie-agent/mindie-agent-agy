@@ -98,7 +98,16 @@ def test_flexible_component_update_baseline_and_atomic_rebind(tmp_path, monkeypa
     import setup
 
     baseline = source_baseline(REPO_ROOT)
-    assert set(baseline["runtime"]) == {"mindie-knowledge", "remote-dev", "mindie-diagnostics"}
+    assert set(baseline["runtime"]) == {
+        "mindie-knowledge",
+        "remote-dev",
+        "mindie-diagnostics",
+        "mindie-coordinator",
+        "mindie-debugger",
+        "mindie-profiler",
+        "mindie-sim",
+        "npu-top",
+    }
     assert all(len(rev) == 40 for rev in baseline["runtime"].values())
 
     cfg_file = tmp_path / "config" / "agy.json"
