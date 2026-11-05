@@ -195,7 +195,7 @@ If you are an AI Agent asked by the user to install this plugin, execute the fol
    ```
    - Report the verified GitHub account (`$GH_USER`), the plugin mount path, and the profile path printed by the command above. That path follows runtime precedence and is not always `~/.config/mindie-agent/agy.json`.
 
-5. **Pop up Antigravity's native `ask_question` tool for first-time consent, GitHub Star, and workspace setup**:
+5. **Pop up Antigravity's native `ask_question` tool for workspace setup, community sharing, and GitHub Star**:
    - First inspect the current sharing status using the stdlib-only check:
      ```sh
      uv run --no-project --python 3.13 python "$PLUGIN_ROOT/scripts/setup.py" sharing --status
@@ -205,6 +205,15 @@ If you are an AI Agent asked by the user to install this plugin, execute the fol
      {
        "questions": [
          {
+           "question": "How would you like to configure your local development workspace (vllm-ascend-workspace)?",
+           "is_multi_select": false,
+           "options": [
+             "(Recommended) Initialize vllm-ascend-workspace in current directory",
+             "Keep current directory as workspace",
+             "Use an existing workspace directory"
+           ]
+         },
+         {
            "question": "Enable MindIE Agent community knowledge sharing and automated fault reporting (Gitleaks-redacted PRs and fault Issues)?",
            "is_multi_select": false,
            "options": [
@@ -213,37 +222,28 @@ If you are an AI Agent asked by the user to install this plugin, execute the fol
            ]
          },
          {
-           "question": "Would you like to star mindie-agent/mindie-agent on GitHub ⭐?",
+           "question": "Would you like to give mindie-agent a Star on GitHub ⭐?",
            "is_multi_select": false,
            "options": [
-             "(Recommended) Star mindie-agent/mindie-agent on GitHub",
-             "Skip for now"
-           ]
-         },
-         {
-           "question": "How would you like to configure your local development workspace (vllm-ascend-workspace)?",
-           "is_multi_select": false,
-           "options": [
-             "(Recommended) Initialize vllm-ascend-workspace in current directory",
-             "Keep current directory as workspace",
-             "Use an existing workspace directory"
+             "(Recommended) Sure, star it ⭐ (Star mindie-agent/mindie-agent on GitHub to support the project)",
+             "Maybe later (Continue without starring)"
            ]
          }
        ]
      }
      ```
    - **Apply the user's choices in strict order (never enable sharing or star without explicit user consent)**:
-     1. **Resolve / initialize the workspace first (`WORKSPACE_ROOT`)**: Follow [Workspace Setup](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md) for Question 3 to determine the target absolute path `WORKSPACE_ROOT`.
+     1. **Resolve / initialize the workspace first (`WORKSPACE_ROOT`)**: Follow [Workspace Setup](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md) for Question 1 to determine the target absolute path `WORKSPACE_ROOT`.
      2. **Persist the community sharing & fault reporting choice**:
-        - If the user chose to enable sharing:
+        - If the user chose to enable sharing in Question 2:
           ```sh
           uv run --no-project --python 3.13 python "$PLUGIN_ROOT/scripts/setup.py" sharing --enable --project-root "$WORKSPACE_ROOT"
           ```
-        - If the user chose local-only mode:
+        - If the user chose local-only mode in Question 2:
           ```sh
           uv run --no-project --python 3.13 python "$PLUGIN_ROOT/scripts/setup.py" sharing --disable
           ```
-     3. **Star `mindie-agent/mindie-agent` if approved**: Only if the user selected the Star option in Question 2:
+     3. **Star `mindie-agent/mindie-agent` if approved**: Only if the user selected the Star option in Question 3:
         ```sh
         gh api --hostname github.com --silent -X PUT /user/starred/mindie-agent/mindie-agent && gh api --hostname github.com --silent /user/starred/mindie-agent/mindie-agent
         ```
