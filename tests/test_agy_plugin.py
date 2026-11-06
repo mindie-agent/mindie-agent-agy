@@ -520,7 +520,9 @@ def test_temp_checkout_script_paths_rebind_to_agy_source(tmp_path: Path, monkeyp
     assert "mindie-agent-agy-install" not in prof["source_root"]
     assert "mindie-agent-agy-install" not in eng_data["transcript_adapter"]
     assert all("mindie-agent-agy-install" not in part for part in eng_data["summary_command"])
-    assert Path(prof["source_root"]).resolve() == (Path(os.environ["MINDIE_DATA_HOME"]) / "agy-source").resolve()
+    version = json.loads((Path(prof["source_root"]) / "plugins/mindie-agent/plugin.json").read_text(encoding="utf-8"))["version"]
+    assert Path(prof["source_root"]).parent.resolve() == (Path(os.environ["MINDIE_DATA_HOME"]) / "agy-source").resolve()
+    assert Path(prof["source_root"]).name.startswith(version + "-")
 
 
 
