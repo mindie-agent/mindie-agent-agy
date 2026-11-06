@@ -8,6 +8,11 @@ from remote_dev.auth.store import auth_error
 from remote_dev.core.errors import AUTH_ERROR_HINTS
 
 
+@pytest.fixture(autouse=True)
+def native_session(monkeypatch):
+    monkeypatch.setenv("AGY_CONVERSATION_ID", "454c6ee9-afea-47be-8188-abb9c7fb1f26")
+
+
 def test_missing_server_environment_points_to_supplied_password(tmp_path, monkeypatch):
     monkeypatch.setenv("REMOTE_DEV_AUTH_DIR", str(tmp_path / "auth"))
     monkeypatch.delenv("REMOTE_DEV_CREDENTIAL_FILE", raising=False)

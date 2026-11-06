@@ -27,6 +27,7 @@ def isolated_mindie_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("MINDIE_CONFIG_HOME", str(cfg_home))
     monkeypatch.setenv("MINDIE_DATA_HOME", str(data_home))
+    monkeypatch.setenv("REMOTE_DEV_STATE_DIR", str(data_home / "remote"))
     monkeypatch.setenv("MINDIE_AGENT_CONFIG", str(cfg_home / "agy.json"))
     monkeypatch.setenv("MINDIE_DIAGNOSTICS_CONFIG", str(cfg_home / "diagnostics.json"))
     monkeypatch.setenv("MINDIE_DIAGNOSTICS_ROOT", str(data_home / "diagnostics"))

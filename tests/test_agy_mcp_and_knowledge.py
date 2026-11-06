@@ -73,11 +73,12 @@ def test_private_knowledge_cli_requires_manual_session_lease(tmp_path: Path, mon
 
 def test_receipt_honesty_preserves_succeeded_remote_result_on_local_sqlite_error(monkeypatch: pytest.MonkeyPatch):
     import remote_dev.mcp.tools as rd_tools
+    monkeypatch.setenv("AGY_CONVERSATION_ID", SESSION_A)
 
     monkeypatch.setattr(
         rd_tools,
         "call_tool",
-        lambda name, args, profile="canonical": {"ok": True, "endpoints": [{"alias": "a3-node"}]},
+        lambda name, args, profile="canonical": {"text": "fixture", "result": {"outcome": "success", "status": "ok"}},
     )
 
     class BrokenFinishReceipts(mcp_server.RemoteReceipts):
@@ -85,12 +86,12 @@ def test_receipt_honesty_preserves_succeeded_remote_result_on_local_sqlite_error
             raise sqlite3.OperationalError("database disk image is malformed on finish")
 
     res = mcp_server.call_remote_surface(
-        "remote_endpoints",
+        "remote_probe",
         {},
         receipts=BrokenFinishReceipts(),
     )
     assert res["isError"] is False
-    assert res["structuredContent"]["ok"] is True
+    assert res["structuredContent"]["result"]["outcome"] == "success"
     assert res["structuredContent"]["receipt_unconfirmed"] is True
     assert "receipt_warning" in res["structuredContent"]
 
