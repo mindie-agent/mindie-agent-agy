@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -73,7 +74,7 @@ _BASELINE_ITEMS = (
 
 def _discover_checkout_source(workspace_root: str | Path | None = None) -> Path | None:
     """Locate a complete `mindie-agent-agy` checkout for source baseline retention."""
-    candidates: list[Path] = [plugin_root().parent.parent]
+    candidates: list[Path] = [HERE.parent.parent.parent, plugin_root().parent.parent]
     if workspace_root is not None:
         ws = Path(workspace_root).expanduser()
         candidates.extend([ws, ws / "mindie-agent-agy"])
@@ -106,44 +107,69 @@ def _copy_lf_clean(src: Path, dst: Path) -> None:
     dst.write_bytes(raw)
 
 
+def _payload_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and path.suffix != ".pyc" and "__pycache__" not in path.parts:
+            digest.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0")
+            with path.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+    return digest.hexdigest()
+
+
 def stage_source_baseline(
     source_dir: str | Path | None = None,
     dest_dir: str | Path | None = None,
     *,
     workspace_root: str | Path | None = None,
 ) -> Path:
-    """Persist an LF-normalized adapter source baseline under `data_home()/agy-source`."""
-    src = (
-        Path(source_dir).resolve()
-        if source_dir is not None
-        else _discover_checkout_source(workspace_root=workspace_root)
-    )
-    dst = Path(dest_dir).resolve() if dest_dir is not None else (data_home() / "agy-source").resolve()
+    """Publish an immutable payload generation before its profile can activate."""
+    src = (Path(source_dir).resolve() if source_dir is not None
+           else _discover_checkout_source(workspace_root=workspace_root))
+    base = (data_home() / "agy-source").resolve()
     if src is None:
-        return dst if (dst / "pyproject.toml").is_file() else repo_root()
-    if src == dst:
-        for fpath in dst.rglob("*"):
-            if fpath.is_file() and fpath.suffix in _TEXT_SUFFIXES and ".git" not in fpath.parts:
-                raw = fpath.read_bytes()
-                if b"\r\n" in raw:
-                    fpath.write_bytes(raw.replace(b"\r\n", b"\n"))
-        return dst
-
-    dst.mkdir(mode=0o700, parents=True, exist_ok=True)
-    for item_name in _BASELINE_ITEMS:
-        item_src = src / item_name
-        if not item_src.exists():
-            continue
-        item_dst = dst / item_name
-        if item_src.is_file():
-            _copy_lf_clean(item_src, item_dst)
+        return base if (base / "pyproject.toml").is_file() else repo_root()
+    data_home().mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".source-stage-", dir=data_home()) as folder:
+        staged = Path(folder)
+        for item_name in _BASELINE_ITEMS:
+            item = src / item_name
+            if not item.exists():
+                continue
+            files = [item] if item.is_file() else sorted(item.rglob("*"))
+            for path in files:
+                if (path.is_file() and path.suffix != ".pyc"
+                        and not any(part in {"__pycache__", ".pytest_cache", ".git", ".venv"}
+                                    for part in path.relative_to(src).parts)):
+                    _copy_lf_clean(path, staged / path.relative_to(src))
+        digest = _payload_digest(staged)
+        if dest_dir is not None:
+            dst = Path(dest_dir).resolve()
+            dst.mkdir(parents=True, exist_ok=True)
+            for path in staged.rglob("*"):
+                if path.is_file():
+                    _copy_lf_clean(path, dst / path.relative_to(staged))
+            return dst
         else:
-            for sub in item_src.rglob("*"):
-                if any(part in {"__pycache__", ".pytest_cache", ".git", ".venv"} for part in sub.parts):
-                    continue
-                if sub.is_file() and sub.suffix != ".pyc":
-                    _copy_lf_clean(sub, item_dst / sub.relative_to(item_src))
-    return dst
+            version = read_json(staged / "plugins/mindie-agent/plugin.json")["version"]
+            if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+                raise ValueError("plugin payload requires a formal version")
+            dst = base / f"{version}-{digest}"
+        if dst.is_dir():
+            if _payload_digest(dst) != digest:
+                raise ValueError("retained plugin payload content changed")
+            return dst
+        dst.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.replace(staged, dst)
+        except TimeoutError:
+            raise
+        except OSError:
+            if not dst.is_dir() or _payload_digest(dst) != digest:
+                raise
+            # Concurrent publication of the same content identity is complete.
+        return dst
 
 
 def _norm_python_path(py_exe: str | Path) -> Path:
@@ -156,43 +182,45 @@ def ensure_runtime_python(
     source_root: str | Path | None = None,
     python_exe: str | None = None,
     *,
+    config: str | Path | None = None,
     timeout: float = BOOTSTRAP_TIMEOUT,
 ) -> str:
     """Return an interpreter with MindIE runtime components installed, bootstrapping `agy-venv` if needed."""
+    from component_update import compatible_runtime
+
+    def verified(interpreter):
+        return compatible_runtime(str(interpreter), source=source_root or _discover_checkout_source() or repo_root(config),
+                                  config=config, timeout=timeout)
+
     if python_exe:
-        return str(_norm_python_path(python_exe))
+        return verified(_norm_python_path(python_exe))
     if all(
         importlib.util.find_spec(mod) is not None
         for mod in (
             "mindie_knowledge",
             "remote_dev",
             "mindie_diagnostics",
-            "mindie_profiler",
-            "mindie_sim",
-            "mindie_coordinator",
-            "mindie_debugger",
-            "npu_top",
         )
     ):
-        return str(_norm_python_path(sys.executable))
+        return verified(_norm_python_path(sys.executable))
 
     venv_dir = data_home() / "agy-venv"
     venv_py = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    src_root = stage_source_baseline(source_root)
     if venv_py.is_file():
         probe = bounded_run(
             [
                 str(venv_py),
                 "-I",
                 "-c",
-                "import mindie_knowledge, remote_dev, mindie_diagnostics, mindie_profiler, mindie_sim, mindie_coordinator, mindie_debugger, npu_top",
+                "import mindie_knowledge, remote_dev, mindie_diagnostics",
             ],
             "",
             timeout=15.0,
         )
         if probe.returncode == 0:
-            return str(_norm_python_path(venv_py))
+            return verified(_norm_python_path(venv_py))
 
+    src_root = stage_source_baseline(source_root)
     uv = shutil.which("uv")
     if uv is None:
         raise RuntimeError("uv is required to bootstrap the MindIE Antigravity runtime")
@@ -218,20 +246,20 @@ def ensure_runtime_python(
     if proc.returncode != 0 or not venv_py.is_file():
         detail = (proc.stderr or proc.stdout or "").strip()[-1000:]
         raise RuntimeError(f"uv sync failed while bootstrapping agy-venv (exit {proc.returncode}): {detail}")
-    return str(_norm_python_path(venv_py))
+    return verified(_norm_python_path(venv_py))
 
 
 def validate_contracts() -> dict:
-    root = repo_root()
+    root = _discover_checkout_source() or repo_root()
     contract_file = root / "product-contract.json"
     compat_file = root / "harness-compatibility.json"
-    contract = read_json(contract_file) if contract_file.is_file() else {"native_version": "0.1.6"}
-    compat = read_json(compat_file) if compat_file.is_file() else {"harness": "antigravity"}
+    contract = read_json(contract_file)
+    compat = read_json(compat_file)
     return dict(
         schema="mindie-candidate-check/1",
         status="validated",
         harness=compat.get("harness", "antigravity"),
-        native_version=contract.get("native_version", "0.1.6"),
+        native_version=contract["native_version"],
     )
 
 
@@ -253,7 +281,7 @@ def ensure_default_profile(
     python_exe: str | None = None,
 ) -> dict:
     apply_enterprise_transport_env()
-    interpreter = ensure_runtime_python(python_exe=python_exe)
+    interpreter = ensure_runtime_python(python_exe=python_exe, config=config)
 
     from mindie_knowledge.loop import settings as settings_mod
 
@@ -267,19 +295,8 @@ def ensure_default_profile(
     sdir.mkdir(mode=0o700, parents=True, exist_ok=True)
     data_root.mkdir(mode=0o700, parents=True, exist_ok=True)
 
-    direct_root = plugin_root().parent.parent
-    is_temp_checkout = _is_temp_checkout_path(direct_root) or "mindie-agent-agy-install" in str(scripts_dir)
-    if not (direct_root / "pyproject.toml").is_file() or is_temp_checkout:
-        src_hint = direct_root if (direct_root / "pyproject.toml").is_file() else None
-        resolved_source = stage_source_baseline(src_hint, workspace_root=workspace_root)
-    else:
-        stage_source_baseline(direct_root, workspace_root=workspace_root)
-        resolved_source = repo_root(cfg_file)
-
-    if is_temp_checkout or "mindie-agent-agy-install" in str(scripts_dir):
-        staged_scripts = (resolved_source / "plugins" / "mindie-agent" / "scripts").resolve()
-        if staged_scripts.is_dir():
-            scripts_dir = staged_scripts
+    resolved_source = stage_source_baseline(workspace_root=workspace_root)
+    scripts_dir = (resolved_source / "plugins/mindie-agent/scripts").resolve()
 
     validation = validate_contracts()
     gitleaks = shutil.which("gitleaks")
@@ -292,7 +309,7 @@ def ensure_default_profile(
                     break
 
     cfile = consent_path(cfg_file)
-    engine_payload = dict(
+    engine_payload = dict(read_json(eng_file) if eng_file.is_file() else {},
         schema="mindie-engine-config/1",
         harness="agy",
         domain=domain,
@@ -308,7 +325,7 @@ def ensure_default_profile(
     )
     atomic_write_json(eng_file, engine_payload)
 
-    adapter_payload = dict(
+    adapter_payload = dict(read_json(cfg_file) if cfg_file.is_file() else {},
         schema="mindie-adapter-config/1",
         harness="antigravity",
         python=interpreter,
@@ -706,8 +723,9 @@ def main(argv: list[str] | None = None) -> int:
         importlib.util.find_spec("mindie_knowledge") is None
         and os.environ.get("_MINDIE_AGY_SETUP_BOOTSTRAPPED") != "1"
     ):
-        staged_src = stage_source_baseline()
-        target_py = ensure_runtime_python(staged_src)
+        source = _discover_checkout_source() or repo_root(args.config)
+        target_py = ensure_runtime_python(source, config=args.config)
+        staged_src = stage_source_baseline(source)
         env = apply_enterprise_transport_env(dict(os.environ))
         env["_MINDIE_AGY_SETUP_BOOTSTRAPPED"] = "1"
         env["MINDIE_AGY_SOURCE_ROOT"] = str(staged_src)
