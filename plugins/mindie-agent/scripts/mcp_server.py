@@ -44,8 +44,8 @@ import uuid
 from admission import status_facts
 from bounded import run as bounded_run
 from component_update import trigger_background_update_if_due
-from identity import claim_bind, finish_bind
-from paths import config_path, read_json, remote_receipts_path
+from identity import claim_bind, finish_bind, require_session
+from paths import bind_db_path, config_path, read_json, remote_receipts_path
 
 REMOTE_GRACE_SECONDS = 60.0
 REMOTE_MIN_BUDGET_SECONDS = 180.0
@@ -301,14 +301,19 @@ def _resolve_component_command(component: str, *, config=None) -> list[str]:
 
 def _resolve_session(surface: str, tool_name: str, arguments: dict, *, config=None) -> tuple[str, str | None]:
     """Resolve session identity from a `PreToolUse` bind or `AGY_CONVERSATION_ID`."""
-    try:
+    if bind_db_path(config).is_file():
         bound = claim_bind(surface, tool_name, arguments, config=config)
         return bound["session"], bound["bind_id"]
-    except ValueError:
-        env_session = os.environ.get("AGY_CONVERSATION_ID") or os.environ.get("REMOTE_DEV_SESSION_ID")
-        if isinstance(env_session, str) and env_session.strip():
-            return env_session.strip(), None
-        return "agy-default-session", None
+    return require_session(os.environ.get("AGY_CONVERSATION_ID")), None
+
+
+def _admission_failure(exc):
+    return dict(isError=True, structuredContent=dict(
+        code="admission_unavailable", execution="not_started", automatic_retry=False,
+        error_type=type(exc).__name__), content=[dict(type="text", text=
+        "This MindIE call did not start because local admission is unavailable. "
+        "Continue independent task steps or use equivalent authorized host-native tools; "
+        "preserve task identity and resource ownership. Do not repeat this call unchanged.")])
 
 
 def _attach_accounting_warning(result: dict, warning_key: str, exc: Exception) -> dict:
@@ -338,7 +343,10 @@ def call_tools_surface(
     receipts: RemoteReceipts | None = None,
 ) -> dict:
     args = dict(arguments or {})
-    session, bind_id = _resolve_session("tools", name, args, config=config)
+    try:
+        session, bind_id = _resolve_session("tools", name, args, config=config)
+    except Exception as exc:
+        return _admission_failure(exc)
     succeeded = False
     try:
         if name == "mindie_status":
@@ -379,14 +387,14 @@ def call_tools_surface(
             if type(timeout_ms) is not int or not 1 <= timeout_ms <= 300000:
                 raise ValueError("timeout_ms must be an integer between 1 and 300000")
 
-            if session and session != "agy-default-session":
-                os.environ["AGY_CONVERSATION_ID"] = session
+            child_env = dict(os.environ, AGY_CONVERSATION_ID=session)
             cmd = _resolve_component_command(component, config=config) + argv
             proc = bounded_run(
                 cmd,
                 "",
                 timeout=timeout_ms / 1000.0,
                 max_output=COMPONENT_CAPTURE_LIMIT_BYTES,
+                env=child_env,
             )
             reply_limit = budget * 4
             stdout_bytes = proc.stdout.encode("utf-8", errors="replace")
@@ -439,19 +447,25 @@ def call_remote_surface(
     receipts: RemoteReceipts | None = None,
 ) -> dict:
     args = dict(arguments or {})
-    session, bind_id = _resolve_session("remote", name, args, config=config)
-    receipt_store = receipts or RemoteReceipts(remote_receipts_path(config))
-    call_id = str(uuid.uuid4())
-    receipt_store.begin(call_id, session, name, args)
+    try:
+        session, bind_id = _resolve_session("remote", name, args, config=config)
+        receipt_store = receipts or RemoteReceipts(remote_receipts_path(config))
+        call_id = str(uuid.uuid4())
+        receipt_store.begin(call_id, session, name, args)
+    except Exception as exc:
+        return _admission_failure(exc)
 
     os.environ["REMOTE_DEV_SESSION_ID"] = session
     succeeded = False
+    outcome = "failed"
     try:
         from remote_dev.mcp.server import tool_text
         from remote_dev.mcp.tools import call_tool
+        from remote_dev.mcp.outcome import operation_outcome
 
         raw = call_tool(name, args, profile="canonical")
-        is_error = bool(isinstance(raw, dict) and raw.get("ok") is False)
+        outcome = operation_outcome(name, raw)
+        is_error = outcome != "succeeded"
         succeeded = not is_error
         blocks = [dict(type="text", text=tool_text(raw))]
         native_blocks = raw.get("content") if isinstance(raw, dict) else None
@@ -465,14 +479,20 @@ def call_remote_surface(
             isError=is_error,
         )
     except Exception as exc:
+        from remote_dev.core.errors import error_details, safe_auth_error_details
+
+        details = error_details(exc)
+        outcome = "unknown" if details.get("submission_state") == "uncertain" else "failed"
+        auth = safe_auth_error_details(details)
         result = dict(
-            content=[dict(type="text", text=f"{type(exc).__name__}: {exc}")],
-            structuredContent=dict(ok=False, error=str(exc), error_type=type(exc).__name__),
+            content=[dict(type="text", text=auth["hint"] if auth else f"{type(exc).__name__}: {exc}")],
+            structuredContent=(dict(ok=False, error_details=auth) if auth else
+                               dict(ok=False, error=str(exc), error_type=type(exc).__name__)),
             isError=True,
         )
 
     try:
-        receipt_store.finish(call_id, "succeeded" if succeeded else "failed")
+        receipt_store.finish(call_id, outcome)
     except (OSError, sqlite3.Error) as exc:
         if succeeded:
             result = _attach_accounting_warning(result, "receipt_warning", exc)
