@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import pytest
@@ -241,6 +242,46 @@ def test_pre_tool_use_bind_failure_denies_with_host_readable_stdout(tmp_path: Pa
     assert emitted["decision"] == "deny"
     assert emitted.get("decision") != "allow"
     assert "OSError" in emitted["reason"]
+
+
+def test_pre_tool_use_bind_timeout_denies_with_host_readable_stdout(tmp_path: Path, monkeypatch, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    event = {
+        "conversationId": SESSION_A,
+        "workspacePaths": [str(workspace)],
+        "stepIdx": 7,
+        "toolCall": {
+            "name": "mcp_mindie-remote-dev_remote_read",
+            "args": {"file_path": "/workspace/vllm_ascend/worker.py"},
+        },
+    }
+
+    def boom(*_args, **_kwargs):
+        raise TimeoutError("mcp-binds sqlite busy_timeout")
+
+    monkeypatch.setattr(bridge, "publish_bind", boom)
+    payload = bridge.handle_pre_tool_use(event)
+    assert payload["decision"] == "deny"
+    assert payload.get("decision") != "allow"
+    assert "TimeoutError" in payload["reason"]
+    assert "busy_timeout" in payload["reason"]
+
+    monkeypatch.setattr(sys, "stdin", type("Stdin", (), {"buffer": io.BytesIO(json.dumps(event).encode())})())
+    assert bridge.main(["pre-tool-use"]) == 0
+    emitted = json.loads(capsys.readouterr().out)
+    assert emitted["decision"] == "deny"
+    assert emitted.get("decision") != "allow"
+    assert "TimeoutError" in emitted["reason"]
+    assert emitted["reason"]
+
+
+def test_status_facts_does_not_report_corrupt_community_as_disabled():
+    comm = Path(os.environ["MINDIE_AGENT_CONFIG"]).parent / "mindie-community.json"
+    comm.write_text("{not-json", encoding="utf-8")
+    facts = admission.status_facts(SESSION_A)
+    assert facts["community_sharing_enabled"] is None
+    assert facts["community_sharing_enabled"] is not False
 
 
 def test_hook_launcher_does_not_mask_exceptions_as_empty_success(monkeypatch, capsys):

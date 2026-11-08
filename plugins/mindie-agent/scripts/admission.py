@@ -10,6 +10,8 @@ lease management (`activate`, `deactivate`, `knowledge_lease`, `status_facts`).
   `entry_enabled == 1`.
 - `status_facts(session)` returns factual control-plane status without onboarding
   prompts (`first_use`, `next`, `recovery`) or implicit service activation.
+  Damaged community config yields `community_sharing_enabled=None`, never
+  `False` (disabled).
 
 [Timeouts & Locks]
 - Uses `Admission`'s WAL + `5.0s` SQLite busy timeout.
@@ -141,8 +143,12 @@ def status_facts(session: str | None = None, *, config: str | Path | None = None
         try:
             comm_data = read_json(comm_path)
             community_enabled = bool(comm_data.get("enabled"))
-        except ValueError:
+        except TimeoutError:
+            raise
+        except FileNotFoundError:
             community_enabled = False
+        except (ValueError, OSError):
+            community_enabled = None
     return dict(
         harness="antigravity",
         configured=configured,

@@ -12,9 +12,10 @@ Implements Antigravity's native hook contracts (`hooks.json`), bridging
 - Lease Honesty: if `Admission.activate` succeeds on `/mindie-agent` in
   `PreInvocation` but background service readiness fails, the active lease is
   preserved (`status="degraded"` warning injected) rather than revoked.
-- `PreToolUse` bind failures return `"decision": "deny"` with the exception
-  and exit 0 so the host consumes stdout; a non-zero exit would drop the JSON
-  and fail-open. They never fall through to `"allow"`.
+- `PreToolUse` bind failures, including `TimeoutError`, return
+  `"decision": "deny"` with the exception and exit 0 so the host consumes
+  stdout; raising or a non-zero exit would drop the JSON and fail-open.
+  They never fall through to `"allow"`.
 - `Stop` never returns `"decision": "continue"` (never forces model
   continuation). Unactivated sessions short-circuit with `{}` before reading
   sharing settings or transcripts. Capture failures emit
@@ -191,8 +192,6 @@ def handle_pre_tool_use(event: dict | None = None, *, config=None) -> dict:
             transcript_path=transcript_from_hook(event),
             config=config,
         )
-    except TimeoutError:
-        raise
     except Exception as exc:
         detail = _hook_failure_text("PreToolUse bind failed", exc)
         print(f"MindIE {detail}", file=sys.stderr)
