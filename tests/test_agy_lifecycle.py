@@ -212,7 +212,7 @@ def test_stop_never_forces_continuation_and_requires_manual_lease(tmp_path: Path
     assert forwarded["transcript_path"] == str(transcript.resolve())
 
 
-def test_pre_tool_use_bind_failure_denies_and_exits_nonzero(tmp_path: Path, monkeypatch, capsys):
+def test_pre_tool_use_bind_failure_denies_with_host_readable_stdout(tmp_path: Path, monkeypatch, capsys):
     workspace = tmp_path / "ws"
     workspace.mkdir()
     event = {
@@ -236,9 +236,10 @@ def test_pre_tool_use_bind_failure_denies_and_exits_nonzero(tmp_path: Path, monk
     assert "No space left on device" in payload["reason"]
 
     monkeypatch.setattr(sys, "stdin", type("Stdin", (), {"buffer": io.BytesIO(json.dumps(event).encode())})())
-    assert bridge.main(["pre-tool-use"]) == 1
+    assert bridge.main(["pre-tool-use"]) == 0
     emitted = json.loads(capsys.readouterr().out)
     assert emitted["decision"] == "deny"
+    assert emitted.get("decision") != "allow"
     assert "OSError" in emitted["reason"]
 
 
@@ -259,7 +260,7 @@ def test_hook_launcher_does_not_mask_exceptions_as_empty_success(monkeypatch, ca
     assert not captured.out.strip().endswith("{}")
 
 
-def test_stop_capture_handoff_failure_emits_system_message(tmp_path: Path, monkeypatch):
+def test_stop_capture_handoff_failure_uses_preinvocation_inject_field(tmp_path: Path, monkeypatch):
     workspace = tmp_path / "ws"
     workspace.mkdir()
     brain_logs = tmp_path / "gemini" / "antigravity" / "brain" / SESSION_A / ".system_generated" / "logs"
@@ -304,6 +305,8 @@ def test_stop_capture_handoff_failure_emits_system_message(tmp_path: Path, monke
         }
     )
     assert failed_stop.get("decision") != "continue"
-    assert failed_stop != {}
-    assert "RuntimeError" in failed_stop["systemMessage"]
-    assert "engine unavailable" in failed_stop["systemMessage"]
+    assert "systemMessage" not in failed_stop
+    assert "injectSteps" in failed_stop
+    warning = failed_stop["injectSteps"][0]["ephemeralMessage"]
+    assert "RuntimeError" in warning
+    assert "engine unavailable" in warning

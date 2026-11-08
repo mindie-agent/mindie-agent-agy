@@ -13,11 +13,12 @@ Implements Antigravity's native hook contracts (`hooks.json`), bridging
   `PreInvocation` but background service readiness fails, the active lease is
   preserved (`status="degraded"` warning injected) rather than revoked.
 - `PreToolUse` bind failures return `"decision": "deny"` with the exception
-  and a non-zero hook exit; they never fall through to `"allow"`.
+  and exit 0 so the host consumes stdout; a non-zero exit would drop the JSON
+  and fail-open. They never fall through to `"allow"`.
 - `Stop` never returns `"decision": "continue"` (never forces model
   continuation). Unactivated sessions short-circuit with `{}` before reading
-  sharing settings or transcripts. Capture failures emit a host-visible
-  `systemMessage` instead of an empty success object.
+  sharing settings or transcripts. Capture failures emit
+  `injectSteps.ephemeralMessage` (the same host field as `PreInvocation`).
 
 [Timeouts & Locks]
 - Runs within `mindie_launch.py`'s `HOOK_TOTAL = 10.0s` budget; SQLite WAL
@@ -64,6 +65,10 @@ def _emit(payload: dict, *, exit_code: int = 0) -> int:
 
 def _hook_failure_text(prefix: str, exc: BaseException) -> str:
     return f"{prefix}: {type(exc).__name__}: {exc}"
+
+
+def _hook_warning_steps(detail: str) -> dict:
+    return {"injectSteps": [{"ephemeralMessage": detail}]}
 
 
 def _read_stdin_event() -> dict:
@@ -234,7 +239,7 @@ def handle_stop(event: dict | None = None, *, config=None) -> dict:
     except (OSError, ValueError) as exc:
         detail = _hook_failure_text("Stop transcript capture failed", exc)
         print(f"MindIE {detail}", file=sys.stderr)
-        return {"systemMessage": detail}
+        return _hook_warning_steps(detail)
 
     exec_num = event.get("executionNum", 1)
     term_reason = event.get("terminationReason", "NO_TOOL_CALL")
@@ -257,7 +262,7 @@ def handle_stop(event: dict | None = None, *, config=None) -> dict:
     except Exception as exc:
         detail = _hook_failure_text("Stop capture handoff failed", exc)
         print(f"MindIE {detail}", file=sys.stderr)
-        return {"systemMessage": detail}
+        return _hook_warning_steps(detail)
     return {}
 
 
@@ -271,8 +276,7 @@ def main(argv: list[str] | None = None) -> int:
     if op == "pre-invocation":
         return _emit(handle_pre_invocation())
     if op == "pre-tool-use":
-        payload = handle_pre_tool_use()
-        return _emit(payload, exit_code=0 if payload.get("decision") == "allow" else 1)
+        return _emit(handle_pre_tool_use())
     if op == "stop":
         return _emit(handle_stop())
     return _emit({})

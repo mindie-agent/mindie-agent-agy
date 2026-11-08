@@ -394,17 +394,23 @@ def sharing_status(config: str | Path | None = None) -> dict:
         state not in {"ok", "missing"}
         for state in (consent_state, community_state, diagnostics_state)
     )
-    sharing_enabled = (
-        community_state == "ok"
-        and bool(comm_data.get("enabled", False))
-        and choice == "contribute"
-    )
+    if community_state == "ok":
+        sharing_enabled = bool(comm_data.get("enabled", False)) and choice == "contribute"
+    elif community_state == "missing":
+        sharing_enabled = False
+    else:
+        sharing_enabled = None
     reporting_sub = diag_data.get("reporting") if isinstance(diag_data.get("reporting"), dict) else {}
-    reporting_enabled = diagnostics_state == "ok" and bool(
-        reporting_sub.get("enabled", False)
-        or diag_data.get("decision") == "enabled"
-        or diag_data.get("enabled") is True
-    )
+    if diagnostics_state == "ok":
+        reporting_enabled = bool(
+            reporting_sub.get("enabled", False)
+            or diag_data.get("decision") == "enabled"
+            or diag_data.get("enabled") is True
+        )
+    elif diagnostics_state == "missing":
+        reporting_enabled = False
+    else:
+        reporting_enabled = None
     needs_onboarding_prompt = (not repair_required) and (choice not in {"contribute", "disabled"})
     return {
         "schema": "mindie-sharing-status/1",

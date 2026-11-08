@@ -13,7 +13,9 @@ generation under `state_dir()/component-runtimes` without requiring a new
 - Atomic Profile Rebinding: `agy.json` and `agy.engine.json` are updated via
   `atomic_write_json` (`os.replace()`) only after the candidate generation passes
   `runtime_inventory` lock and VCS receipt verification.
-- Background spawn failure rewrites `status="failed"` with `error` and raises;
+- Background spawn writes `in_progress` with `pid` only after `Popen` returns;
+  a stored `in_progress` whose pid is not running is reclaimed instead of
+  blocking the next check. Spawn failure records `status="failed"` and raises.
   `read_inventory` failure publishes `status="failed"` rather than `up_to_date`.
 - Never writes into `~/.gemini` and never activates a session lease.
 
@@ -76,6 +78,22 @@ def _record_background_update_failure(status_file: Path, checked_at: float, exc:
         )
 
 
+def _pid_running(pid) -> bool:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except TimeoutError:
+        raise
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def trigger_background_update_if_due(*, config: str | Path | None = None) -> bool:
     """Spawn a non-blocking background `component_update.py` check if the interval has elapsed."""
     if os.environ.get("MINDIE_CONFIG_HOME") is not None:
@@ -89,10 +107,17 @@ def trigger_background_update_if_due(*, config: str | Path | None = None) -> boo
         data = read_json(status_file)
         checked = float(data.get("checked_at") or 0.0)
         st = data.get("status")
-        interval = UPDATE_FAILURE_BACKOFF if st == "failed" else UPDATE_CHECK_INTERVAL
-        if now - checked < interval:
+        if st == "in_progress" and _pid_running(data.get("pid")):
             return False
-    atomic_write_json(status_file, {"checked_at": now, "status": "in_progress"})
+        if st == "in_progress":
+            print(
+                "MindIE background updater pid is not running; reclaiming leftover in_progress",
+                file=sys.stderr,
+            )
+        elif st == "failed" and now - checked < UPDATE_FAILURE_BACKOFF:
+            return False
+        elif st != "failed" and now - checked < UPDATE_CHECK_INTERVAL:
+            return False
     try:
         adapter = read_json(cfg_file)
         py_exe = adapter.get("python") or sys.executable
@@ -115,13 +140,31 @@ def trigger_background_update_if_due(*, config: str | Path | None = None) -> boo
             )
         else:
             kwargs["start_new_session"] = True
-        subprocess.Popen([str(py_exe), "-I", str(Path(__file__).resolve()), "--config", str(cfg_file)], **kwargs)
+        proc = subprocess.Popen(
+            [str(py_exe), "-I", str(Path(__file__).resolve()), "--config", str(cfg_file)],
+            **kwargs,
+        )
     except TimeoutError as exc:
         _record_background_update_failure(status_file, now, exc)
         raise
     except Exception as exc:
         _record_background_update_failure(status_file, now, exc)
         raise
+    try:
+        atomic_write_json(
+            status_file,
+            {"checked_at": now, "status": "in_progress", "pid": int(proc.pid)},
+        )
+    except TimeoutError as write_exc:
+        print(
+            f"MindIE background update status write timed out after spawn: {write_exc}",
+            file=sys.stderr,
+        )
+    except OSError as write_exc:
+        print(
+            f"MindIE background update status write failed after spawn: {type(write_exc).__name__}: {write_exc}",
+            file=sys.stderr,
+        )
     return True
 
 

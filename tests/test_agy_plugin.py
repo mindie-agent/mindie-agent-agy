@@ -223,11 +223,14 @@ def test_windows_subprocess_creationflags_prevent_console_window(tmp_path, monke
     monkeypatch.delenv("MINDIE_CONFIG_HOME", raising=False)
     monkeypatch.setattr(component_update, "os", type("NT", (), {"name": "nt", "environ": {}}))
     bg_calls: list[dict] = []
-    monkeypatch.setattr(
-        subprocess,
-        "Popen",
-        lambda argv, **kwargs: bg_calls.append(dict(kwargs)),
-    )
+
+    class FakeProc:
+        pid = 4242
+
+        def __init__(self, argv, **kwargs):
+            bg_calls.append(dict(kwargs))
+
+    monkeypatch.setattr(subprocess, "Popen", FakeProc)
     assert component_update.trigger_background_update_if_due(config=cfg_file) is True
     assert len(bg_calls) == 1
     bg_flags = bg_calls[0]["creationflags"]
@@ -560,6 +563,50 @@ def test_background_update_spawn_failure_records_failed_not_in_progress(tmp_path
     assert "cannot spawn updater" in status["error"]
 
 
+def test_stale_in_progress_without_live_pid_is_reclaimed(tmp_path, monkeypatch):
+    import json as json_mod
+    import os
+    import subprocess
+    import sys
+    import time
+    import component_update
+    import paths
+
+    cfg_file = tmp_path / "agy.json"
+    cfg_file.write_text(json_mod.dumps({"python": sys.executable}), encoding="utf-8")
+    monkeypatch.delenv("MINDIE_CONFIG_HOME", raising=False)
+    status_file = paths.data_home() / "component-update-status.json"
+    status_file.parent.mkdir(parents=True, exist_ok=True)
+    dead = subprocess.Popen([sys.executable, "-c", "raise SystemExit(0)"])
+    dead.wait()
+    status_file.write_text(
+        json_mod.dumps({"checked_at": time.time(), "status": "in_progress", "pid": dead.pid}),
+        encoding="utf-8",
+    )
+    spawned: list[int] = []
+
+    class FakeProc:
+        def __init__(self, argv, **kwargs):
+            self.pid = 4242
+            spawned.append(self.pid)
+
+    monkeypatch.setattr(subprocess, "Popen", FakeProc)
+    assert component_update.trigger_background_update_if_due(config=cfg_file) is True
+    assert spawned == [4242]
+    updated = json_mod.loads(status_file.read_text(encoding="utf-8"))
+    assert updated["status"] == "in_progress"
+    assert updated["pid"] == 4242
+
+    live_status = {"checked_at": time.time(), "status": "in_progress", "pid": os.getpid()}
+    status_file.write_text(json_mod.dumps(live_status), encoding="utf-8")
+    spawned.clear()
+    assert component_update.trigger_background_update_if_due(config=cfg_file) is False
+    assert spawned == []
+    still = json_mod.loads(status_file.read_text(encoding="utf-8"))
+    assert still["status"] == "in_progress"
+    assert still["pid"] == os.getpid()
+
+
 def test_inventory_read_failure_is_failed_not_up_to_date(tmp_path, monkeypatch):
     import component_update
     import setup
@@ -610,7 +657,9 @@ def test_sharing_status_marks_corrupt_configs_as_repair_required(tmp_path, monke
     status = setup.sharing_status()
     assert status["community_state"] == "corrupt"
     assert status["repair_required"] is True
-    assert status["sharing_enabled"] is False
+    assert status["sharing_enabled"] is None
+    assert status["community_enabled"] is None
+    assert status["sharing_enabled"] is not False
     assert status["repository"] is None
     assert status["needs_onboarding_prompt"] is False
 
@@ -619,7 +668,8 @@ def test_sharing_status_marks_corrupt_configs_as_repair_required(tmp_path, monke
     diag_status = setup.sharing_status()
     assert diag_status["diagnostics_state"] == "corrupt"
     assert diag_status["repair_required"] is True
-    assert diag_status["reporting_enabled"] is False
+    assert diag_status["reporting_enabled"] is None
+    assert diag_status["reporting_enabled"] is not False
 
     diag.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(setup, "read_json", lambda *_a, **_kw: (_ for _ in ()).throw(TimeoutError("config read timed out")))
