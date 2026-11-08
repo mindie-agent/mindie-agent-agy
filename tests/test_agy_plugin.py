@@ -712,5 +712,28 @@ def test_hook_reexec_passes_hook_total_timeout_and_mcp_stays_unbounded(monkeypat
     assert seen[1]["timeout"] is None
 
 
+def test_hook_reexec_timeout_emits_host_readable_json_and_exit_0(monkeypatch, capsys):
+    import subprocess
+    import mindie_launch
+
+    def boom(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd=["python"], timeout=mindie_launch.HOOK_TOTAL)
+
+    monkeypatch.setattr(mindie_launch, "_preferred_python", lambda: "/tmp/other-python")
+    monkeypatch.setattr(subprocess, "run", boom)
+
+    assert mindie_launch.main(["hook", "pre-tool-use"]) == 0
+    denied = json.loads(capsys.readouterr().out)
+    assert denied["decision"] == "deny"
+    assert denied.get("decision") != "allow"
+    assert "TimeoutExpired" in denied["reason"]
+
+    assert mindie_launch.main(["hook", "stop"]) == 0
+    stopped = json.loads(capsys.readouterr().out)
+    assert stopped.get("decision") != "continue"
+    assert "injectSteps" in stopped
+    assert "TimeoutExpired" in stopped["injectSteps"][0]["ephemeralMessage"]
+
+
 
 

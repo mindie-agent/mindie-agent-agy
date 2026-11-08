@@ -18,6 +18,7 @@ and factual `mindie_status`).
   `receipt_warning` + `receipt_unconfirmed=True` are attached to
   `structuredContent` so the caller never blindly repeats a completed mutation.
 - Non-empty UTF-8/JSON parse failures return JSON-RPC `-32700` Parse error.
+- Background updater spawn failure never aborts `tools/call` or the stdio loop.
 
 [Timeouts & Locks]
 - Uses SQLite WAL mode with `busy_timeout=5000` (`timeout=5.0`) for
@@ -532,7 +533,13 @@ def handle_rpc(request: dict, surface: str, *, config=None, receipts: RemoteRece
         tools = remote_catalog() if surface == "remote" else tools_catalog()
         return dict(jsonrpc="2.0", id=req_id, result=dict(tools=tools))
     if method == "tools/call":
-        trigger_background_update_if_due(config=config)
+        try:
+            trigger_background_update_if_due(config=config)
+        except Exception as exc:
+            print(
+                f"MindIE background updater spawn failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
         name = params.get("name")
         arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
         if not isinstance(name, str) or not name:

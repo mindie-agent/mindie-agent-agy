@@ -8,7 +8,9 @@ and setup commands (`setup ...`) under explicit timeout budgets.
 [Invariants]
 - Enforces `HOOK_TOTAL = 10.0s >= HOOK_EXEC_BUDGET (8.0s) + CLEANUP_GRACE (2.0s)`.
 - Hook failures never emit `{}` with exit 0. `PreToolUse` bind errors deny the
-  call; other hook exceptions propagate to a non-zero process status.
+  call. Hook re-exec `TimeoutExpired` emits host-readable JSON and exit 0
+  (`PreToolUse` deny; other hooks `injectSteps.ephemeralMessage`); exit 1 with
+  empty stdout would fail-open. Other hook exceptions propagate.
 - If the configured profile interpreter differs from `sys.executable` on MCP
   launch, re-executes into the configured interpreter so `mindie_knowledge`,
   `remote_dev`, and `mindie_diagnostics` imports resolve deterministically.
@@ -165,10 +167,22 @@ def main(argv: list[str] | None = None) -> int:
         try:
             proc = subprocess.run([target_py, "-I", str(target_script), *argv], **run_kwargs)
         except subprocess.TimeoutExpired as exc:
-            print(
-                f"MindIE {argv[0]} reexec exceeded timeout={run_kwargs.get('timeout')}: {exc}",
-                file=sys.stderr,
+            detail = (
+                f"{argv[0]} reexec exceeded timeout={run_kwargs.get('timeout')}: "
+                f"{type(exc).__name__}: {exc}"
             )
+            print(f"MindIE {detail}", file=sys.stderr)
+            if argv[0] == "hook":
+                op = argv[1] if len(argv) > 1 else ""
+                if op == "pre-tool-use":
+                    payload = {"decision": "deny", "reason": detail}
+                else:
+                    payload = {"injectSteps": [{"ephemeralMessage": detail}]}
+                sys.stdout.buffer.write(
+                    (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+                )
+                sys.stdout.buffer.flush()
+                return 0
             return 1
         return int(proc.returncode)
 

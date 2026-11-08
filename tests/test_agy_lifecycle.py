@@ -282,6 +282,8 @@ def test_status_facts_does_not_report_corrupt_community_as_disabled():
     facts = admission.status_facts(SESSION_A)
     assert facts["community_sharing_enabled"] is None
     assert facts["community_sharing_enabled"] is not False
+    assert facts["repair_required"] is True
+    assert facts["community_state"] == "corrupt"
 
 
 def test_hook_launcher_does_not_mask_exceptions_as_empty_success(monkeypatch, capsys):
@@ -351,3 +353,66 @@ def test_stop_capture_handoff_failure_uses_preinvocation_inject_field(tmp_path: 
     warning = failed_stop["injectSteps"][0]["ephemeralMessage"]
     assert "RuntimeError" in warning
     assert "engine unavailable" in warning
+
+
+def test_stop_timeout_uses_inject_steps_instead_of_empty_stdout(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    brain_logs = tmp_path / "gemini" / "antigravity" / "brain" / SESSION_A / ".system_generated" / "logs"
+    brain_logs.mkdir(parents=True)
+    transcript = brain_logs / "transcript.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    bridge.handle_pre_invocation(
+        {
+            "conversationId": SESSION_A,
+            "workspacePaths": [str(workspace)],
+            "lastUserInput": "/mindie-agent test",
+        }
+    )
+    setup.configure_community(enabled=True, fork="user/knowledge-vllm-ascend", project_root=workspace)
+
+    def boom(*_args, **_kwargs):
+        raise TimeoutError("transcript read timed out")
+
+    monkeypatch.setattr(bridge, "capture_source", boom)
+    failed_stop = bridge.handle_stop(
+        {
+            "conversationId": SESSION_A,
+            "workspacePaths": [str(workspace)],
+            "transcriptPath": str(transcript),
+            "executionNum": 2,
+            "terminationReason": "NO_TOOL_CALL",
+        }
+    )
+    assert failed_stop.get("decision") != "continue"
+    assert "systemMessage" not in failed_stop
+    assert "injectSteps" in failed_stop
+    warning = failed_stop["injectSteps"][0]["ephemeralMessage"]
+    assert "TimeoutError" in warning
+    assert "transcript read timed out" in warning
+
+
+def test_session_start_updater_spawn_failure_stays_host_readable(tmp_path: Path, monkeypatch):
+    import subprocess
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.delenv("MINDIE_CONFIG_HOME", raising=False)
+    cfg = Path(os.environ["MINDIE_AGENT_CONFIG"])
+    cfg.write_text(json.dumps({"python": sys.executable}), encoding="utf-8")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("cannot spawn updater")
+
+    monkeypatch.setattr(subprocess, "Popen", boom)
+    start_out = bridge.handle_session_start(
+        {
+            "conversationId": SESSION_A,
+            "workspacePaths": [str(workspace)],
+        }
+    )
+    assert start_out.get("decision") != "continue"
+    assert "injectSteps" in start_out
+    warning = start_out["injectSteps"][0]["ephemeralMessage"]
+    assert "OSError" in warning
+    assert "cannot spawn updater" in warning

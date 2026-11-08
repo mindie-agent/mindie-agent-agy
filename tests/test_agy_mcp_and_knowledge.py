@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 import pytest
 
@@ -168,4 +171,30 @@ def test_mcp_parse_error_returns_jsonrpc_minus_32700_and_keeps_serving(monkeypat
     assert "Parse error" in frames[0]["error"]["message"]
     assert frames[1]["id"] == 7
     assert frames[1]["result"] == {}
+
+
+def test_mcp_tools_call_survives_updater_spawn_failure(monkeypatch):
+    monkeypatch.delenv("MINDIE_CONFIG_HOME", raising=False)
+    monkeypatch.setenv("AGY_CONVERSATION_ID", SESSION_A)
+    cfg = Path(os.environ["MINDIE_AGENT_CONFIG"])
+    cfg.write_text(json.dumps({"python": sys.executable}), encoding="utf-8")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("cannot spawn updater")
+
+    monkeypatch.setattr(subprocess, "Popen", boom)
+    resp = mcp_server.handle_rpc(
+        {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {"name": "mindie_status", "arguments": {}},
+        },
+        "tools",
+    )
+    assert resp["id"] == 9
+    assert "error" not in resp
+    facts = resp["result"]["structuredContent"]
+    assert facts["harness"] == "antigravity"
+    assert "repair_required" in facts
 

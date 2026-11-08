@@ -18,8 +18,10 @@ Implements Antigravity's native hook contracts (`hooks.json`), bridging
   They never fall through to `"allow"`.
 - `Stop` never returns `"decision": "continue"` (never forces model
   continuation). Unactivated sessions short-circuit with `{}` before reading
-  sharing settings or transcripts. Capture failures emit
-  `injectSteps.ephemeralMessage` (the same host field as `PreInvocation`).
+  sharing settings or transcripts. Capture failures, including `TimeoutError`,
+  emit `injectSteps.ephemeralMessage` (the same host field as `PreInvocation`).
+- Background updater spawn failure is stderr + `injectSteps`; it never
+  aborts `SessionStart` with empty stdout.
 
 [Timeouts & Locks]
 - Runs within `mindie_launch.py`'s `HOOK_TOTAL = 10.0s` budget; SQLite WAL
@@ -80,26 +82,32 @@ def _read_stdin_event() -> dict:
 def handle_session_start(event: dict | None = None, *, config=None) -> dict:
     """`SessionStart` hook: passive by default; never activates a knowledge lease."""
     event = _read_stdin_event() if event is None else event
-    trigger_background_update_if_due(config=config)
+    update_warning = ""
+    try:
+        trigger_background_update_if_due(config=config)
+    except Exception as exc:
+        update_warning = _hook_failure_text("background updater spawn failed", exc)
+        print(f"MindIE {update_warning}", file=sys.stderr)
     try:
         session = session_from_hook(event)
     except ValueError:
-        return {}
+        return _hook_warning_steps(update_warning) if update_warning else {}
     lease = knowledge_lease(session, config=config)
     if lease is None:
-        return {}
-    return {
-        "injectSteps": [
-            {
-                "systemMessage": {
-                    "systemMessage": (
-                        f"MindIE Agent knowledge lease is active for conversation {session} "
-                        f"(project_root={lease.get('project_root')})."
-                    )
-                }
+        return _hook_warning_steps(update_warning) if update_warning else {}
+    steps = [
+        {
+            "systemMessage": {
+                "systemMessage": (
+                    f"MindIE Agent knowledge lease is active for conversation {session} "
+                    f"(project_root={lease.get('project_root')})."
+                )
             }
-        ]
-    }
+        }
+    ]
+    if update_warning:
+        steps.append({"ephemeralMessage": update_warning})
+    return {"injectSteps": steps}
 
 
 def handle_pre_invocation(event: dict | None = None, *, config=None) -> dict:
@@ -233,9 +241,7 @@ def handle_stop(event: dict | None = None, *, config=None) -> dict:
         return {}
     try:
         source = capture_source(transcript, session, binding=lease)
-    except TimeoutError:
-        raise
-    except (OSError, ValueError) as exc:
+    except (TimeoutError, OSError, ValueError) as exc:
         detail = _hook_failure_text("Stop transcript capture failed", exc)
         print(f"MindIE {detail}", file=sys.stderr)
         return _hook_warning_steps(detail)
@@ -256,8 +262,6 @@ def handle_stop(event: dict | None = None, *, config=None) -> dict:
         from mindie_knowledge.loop.cli import capture_hook
 
         capture_hook(str(engine_config_path(config)), forwarded)
-    except TimeoutError:
-        raise
     except Exception as exc:
         detail = _hook_failure_text("Stop capture handoff failed", exc)
         print(f"MindIE {detail}", file=sys.stderr)

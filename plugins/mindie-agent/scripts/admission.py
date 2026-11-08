@@ -11,7 +11,8 @@ lease management (`activate`, `deactivate`, `knowledge_lease`, `status_facts`).
 - `status_facts(session)` returns factual control-plane status without onboarding
   prompts (`first_use`, `next`, `recovery`) or implicit service activation.
   Damaged community config yields `community_sharing_enabled=None`, never
-  `False` (disabled).
+  `False` (disabled). Corrupt/unreadable sharing files set
+  `repair_required=True` (same rule as `sharing_status`).
 
 [Timeouts & Locks]
 - Uses `Admission`'s WAL + `5.0s` SQLite busy timeout.
@@ -149,6 +150,9 @@ def status_facts(session: str | None = None, *, config: str | Path | None = None
             community_enabled = False
         except (ValueError, OSError):
             community_enabled = None
+    from setup import sharing_status
+
+    share = sharing_status(config)
     return dict(
         harness="antigravity",
         configured=configured,
@@ -160,4 +164,7 @@ def status_facts(session: str | None = None, *, config: str | Path | None = None
         activated_at=lease.get("activated_at") if lease else None,
         consent_choice=consent_state,
         community_sharing_enabled=community_enabled,
+        community_state=share["community_state"],
+        diagnostics_state=share["diagnostics_state"],
+        repair_required=bool(share["repair_required"]),
     )
