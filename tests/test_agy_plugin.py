@@ -28,6 +28,15 @@ def test_plugin_manifest_and_root_hooks_layout():
     assert "mindie-agent" in hooks_cfg
     events = hooks_cfg["mindie-agent"]
     assert set(events) == {"SessionStart", "PreInvocation", "PreToolUse", "Stop"}
+    import mindie_launch
+
+    assert mindie_launch.HOOK_OUTER_SECONDS == int(
+        mindie_launch.HOOK_TOTAL + mindie_launch.HOOK_UV_STARTUP
+    )
+    assert events["SessionStart"][0]["timeout"] >= mindie_launch.HOOK_OUTER_SECONDS
+    assert events["PreInvocation"][0]["timeout"] >= mindie_launch.HOOK_OUTER_SECONDS
+    assert events["Stop"][0]["timeout"] >= mindie_launch.HOOK_OUTER_SECONDS
+    assert events["PreToolUse"][0]["hooks"][0]["timeout"] >= mindie_launch.HOOK_OUTER_SECONDS
 
     mcp_cfg = json.loads((PLUGIN_ROOT / "mcp_config.json").read_text(encoding="utf-8"))
     servers = mcp_cfg["mcpServers"]
@@ -325,6 +334,7 @@ def test_init_still_bootstraps_when_knowledge_is_missing(monkeypatch):
 
     def fake_run(argv, **kwargs):
         seen["argv"] = list(argv)
+        seen["timeout"] = kwargs.get("timeout")
         seen["bootstrapped"] = kwargs.get("env", {}).get("_MINDIE_AGY_SETUP_BOOTSTRAPPED")
         return subprocess.CompletedProcess(argv, 0)
 
@@ -336,6 +346,7 @@ def test_init_still_bootstraps_when_knowledge_is_missing(monkeypatch):
     assert seen["stage"] is True
     assert seen["runtime"] is True
     assert seen["bootstrapped"] == "1"
+    assert seen["timeout"] == setup_mod.BOOTSTRAP_TIMEOUT + setup_mod.BOOTSTRAP_CLEANUP_GRACE
     assert seen["argv"][-3:] == ["init", "--workspace-root", "/tmp/workspace"]
 
 
@@ -523,6 +534,132 @@ def test_temp_checkout_script_paths_rebind_to_agy_source(tmp_path: Path, monkeyp
     version = json.loads((Path(prof["source_root"]) / "plugins/mindie-agent/plugin.json").read_text(encoding="utf-8"))["version"]
     assert Path(prof["source_root"]).parent.resolve() == (Path(os.environ["MINDIE_DATA_HOME"]) / "agy-source").resolve()
     assert Path(prof["source_root"]).name.startswith(version + "-")
+
+
+def test_background_update_spawn_failure_records_failed_not_in_progress(tmp_path, monkeypatch):
+    import json as json_mod
+    import subprocess
+    import sys
+    import component_update
+    import paths
+
+    cfg_file = tmp_path / "agy.json"
+    cfg_file.write_text(json_mod.dumps({"python": sys.executable}), encoding="utf-8")
+    monkeypatch.delenv("MINDIE_CONFIG_HOME", raising=False)
+
+    def boom(*_args, **_kwargs):
+        raise OSError("cannot spawn updater")
+
+    monkeypatch.setattr(subprocess, "Popen", boom)
+    with pytest.raises(OSError, match="cannot spawn updater"):
+        component_update.trigger_background_update_if_due(config=cfg_file)
+    status = json_mod.loads((paths.data_home() / "component-update-status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "failed"
+    assert status["status"] != "in_progress"
+    assert "OSError" in status["error"]
+    assert "cannot spawn updater" in status["error"]
+
+
+def test_inventory_read_failure_is_failed_not_up_to_date(tmp_path, monkeypatch):
+    import component_update
+    import setup
+
+    cfg_file = tmp_path / "config" / "agy.json"
+    setup.ensure_default_profile(config=cfg_file, workspace_root=tmp_path)
+    monkeypatch.setattr(component_update, "prepare", lambda *a, **kw: None)
+
+    def boom(*_args, **_kwargs):
+        raise OSError("inventory sqlite locked")
+
+    monkeypatch.setattr("mindie_knowledge.component_runtime.read_inventory", boom)
+    result = component_update.check(config=cfg_file, source=REPO_ROOT)
+    assert result["status"] == "failed"
+    assert result["status"] != "up_to_date"
+    assert "OSError" in result["inventory_error"]
+    assert "inventory sqlite locked" in result["inventory_error"]
+    status = json.loads((Path(os.environ["MINDIE_DATA_HOME"]) / "component-update-status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "failed"
+    assert "inventory sqlite locked" in status["error"]
+
+
+def test_inventory_timeout_is_failed_and_reraised(tmp_path, monkeypatch):
+    import component_update
+    import setup
+
+    cfg_file = tmp_path / "config" / "agy.json"
+    setup.ensure_default_profile(config=cfg_file, workspace_root=tmp_path)
+    monkeypatch.setattr(component_update, "prepare", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "mindie_knowledge.component_runtime.read_inventory",
+        lambda *_a, **_kw: (_ for _ in ()).throw(TimeoutError("inventory read timed out")),
+    )
+    with pytest.raises(TimeoutError, match="inventory read timed out"):
+        component_update.check(config=cfg_file, source=REPO_ROOT)
+    status = json.loads((Path(os.environ["MINDIE_DATA_HOME"]) / "component-update-status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "failed"
+    assert "TimeoutError" in status["error"]
+
+
+def test_sharing_status_marks_corrupt_configs_as_repair_required(tmp_path, monkeypatch):
+    import setup
+
+    cfg = Path(os.environ["MINDIE_AGENT_CONFIG"])
+    comm = cfg.parent / "mindie-community.json"
+    diag = Path(os.environ["MINDIE_DIAGNOSTICS_CONFIG"])
+    comm.write_text("{not-json", encoding="utf-8")
+    status = setup.sharing_status()
+    assert status["community_state"] == "corrupt"
+    assert status["repair_required"] is True
+    assert status["sharing_enabled"] is False
+    assert status["repository"] is None
+    assert status["needs_onboarding_prompt"] is False
+
+    comm.unlink()
+    diag.write_text("{not-json", encoding="utf-8")
+    diag_status = setup.sharing_status()
+    assert diag_status["diagnostics_state"] == "corrupt"
+    assert diag_status["repair_required"] is True
+    assert diag_status["reporting_enabled"] is False
+
+    diag.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(setup, "read_json", lambda *_a, **_kw: (_ for _ in ()).throw(TimeoutError("config read timed out")))
+    with pytest.raises(TimeoutError, match="config read timed out"):
+        setup.sharing_status()
+
+
+def test_configure_community_does_not_swallow_reporting_activation(tmp_path, monkeypatch):
+    import mindie_knowledge.consent_store as consent_store
+    import setup
+
+    monkeypatch.setattr(
+        consent_store,
+        "activate_reporting",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("reporting backend down")),
+    )
+    with pytest.raises(RuntimeError, match="reporting backend down"):
+        setup.configure_community(
+            enabled=True,
+            fork="user/knowledge-vllm-ascend",
+            project_root=tmp_path,
+        )
+
+
+def test_hook_reexec_passes_hook_total_timeout_and_mcp_stays_unbounded(monkeypatch):
+    import subprocess
+    import mindie_launch
+
+    seen: list[dict] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append({"argv": list(argv), "timeout": kwargs.get("timeout")})
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(mindie_launch, "_preferred_python", lambda: "/tmp/other-python")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert mindie_launch.main(["hook", "session-start"]) == 0
+    assert seen[0]["timeout"] == mindie_launch.HOOK_TOTAL
+    assert mindie_launch.main(["mcp", "tools"]) == 0
+    assert seen[1]["timeout"] is None
 
 
 

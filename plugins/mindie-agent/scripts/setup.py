@@ -14,7 +14,8 @@ the persistent component virtualenv (`agy-venv`) and LF-normalized source baseli
 
 [Timeouts & Locks]
 - Local config validation/writes are immediate; first-time `uv sync` runtime
-  bootstrap is bounded by `BOOTSTRAP_TIMEOUT = 540.0s`.
+  bootstrap is bounded by `BOOTSTRAP_TIMEOUT = 540.0s`. Interpreter re-exec
+  uses `timeout=BOOTSTRAP_TIMEOUT + BOOTSTRAP_CLEANUP_GRACE`.
 
 [Side-Effect Policy]
 - Writes `agy.json`, `agy.engine.json`, `mindie-community.json`, and
@@ -62,6 +63,7 @@ from paths import (
 )
 
 BOOTSTRAP_TIMEOUT = 540.0
+BOOTSTRAP_CLEANUP_GRACE = 5.0
 _REPO_SLUG_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 _TEXT_SUFFIXES = {".py", ".json", ".md", ".toml", ".svg", ".txt", ".yml", ".yaml"}
 _BASELINE_ITEMS = (
@@ -362,6 +364,8 @@ def _read_optional_json(path: Path) -> tuple[str, dict]:
         return "missing", {}
     try:
         return "ok", read_json(path)
+    except TimeoutError:
+        raise
     except FileNotFoundError:
         return "missing", {}
     except ValueError:
@@ -378,18 +382,25 @@ def sharing_status(config: str | Path | None = None) -> dict:
     diag_file = diagnostics_config_path(cfg_file)
 
     consent_state, consent_data = _read_optional_json(cfile)
-    _, comm_data = _read_optional_json(comm_file)
-    _, diag_data = _read_optional_json(diag_file)
+    community_state, comm_data = _read_optional_json(comm_file)
+    diagnostics_state, diag_data = _read_optional_json(diag_file)
 
     choice = consent_data.get("choice") if consent_state == "ok" else None
     if consent_state == "ok" and choice not in (None, "contribute", "read-only", "later", "disabled"):
         consent_state = "corrupt"
         choice = None
     choice_revision = consent_data.get("choice_revision") if consent_state == "ok" else None
-    repair_required = consent_state in {"corrupt", "unreadable"}
-    sharing_enabled = bool(comm_data.get("enabled", False)) and choice == "contribute"
+    repair_required = any(
+        state not in {"ok", "missing"}
+        for state in (consent_state, community_state, diagnostics_state)
+    )
+    sharing_enabled = (
+        community_state == "ok"
+        and bool(comm_data.get("enabled", False))
+        and choice == "contribute"
+    )
     reporting_sub = diag_data.get("reporting") if isinstance(diag_data.get("reporting"), dict) else {}
-    reporting_enabled = bool(
+    reporting_enabled = diagnostics_state == "ok" and bool(
         reporting_sub.get("enabled", False)
         or diag_data.get("decision") == "enabled"
         or diag_data.get("enabled") is True
@@ -399,15 +410,17 @@ def sharing_status(config: str | Path | None = None) -> dict:
         "schema": "mindie-sharing-status/1",
         "harness": "antigravity",
         "consent_state": consent_state,
+        "community_state": community_state,
+        "diagnostics_state": diagnostics_state,
         "consent_choice": choice,
         "choice_revision": choice_revision,
         "sharing_enabled": sharing_enabled,
         "community_enabled": sharing_enabled,
         "reporting_enabled": reporting_enabled,
-        "repository": comm_data.get("repository", "mindie-agent/knowledge-vllm-ascend"),
-        "fork": comm_data.get("fork"),
-        "account": comm_data.get("account"),
-        "project_roots": list(comm_data.get("project_roots") or []),
+        "repository": comm_data.get("repository") if community_state == "ok" else None,
+        "fork": comm_data.get("fork") if community_state == "ok" else None,
+        "account": comm_data.get("account") if community_state == "ok" else None,
+        "project_roots": list(comm_data.get("project_roots") or []) if community_state == "ok" else [],
         "needs_onboarding_prompt": needs_onboarding_prompt,
         "repair_required": repair_required,
     }
@@ -562,15 +575,12 @@ def configure_community(
 
     diag_file = diagnostics_config_path(cfg_file)
     if hasattr(consent_store, "activate_reporting"):
-        try:
-            consent_store.activate_reporting(
-                cfile,
-                config=diag_file,
-                roots=roots or None,
-                ensure=False,
-            )
-        except Exception:
-            pass
+        consent_store.activate_reporting(
+            cfile,
+            config=diag_file,
+            roots=roots or None,
+            ensure=False,
+        )
     return updated.as_dict()
 
 
@@ -729,13 +739,20 @@ def main(argv: list[str] | None = None) -> int:
         env = apply_enterprise_transport_env(dict(os.environ))
         env["_MINDIE_AGY_SETUP_BOOTSTRAPPED"] = "1"
         env["MINDIE_AGY_SOURCE_ROOT"] = str(staged_src)
-        run_kwargs: dict = {"env": env}
+        run_kwargs: dict = {"env": env, "timeout": BOOTSTRAP_TIMEOUT + BOOTSTRAP_CLEANUP_GRACE}
         if os.name == "nt":
             run_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             run_kwargs["stdin"] = _reexec_stdio(sys.stdin)
             run_kwargs["stdout"] = _reexec_stdio(sys.stdout)
             run_kwargs["stderr"] = _reexec_stdio(sys.stderr)
-        proc = subprocess.run([target_py, "-I", str(Path(__file__).resolve()), *raw_argv], **run_kwargs)
+        try:
+            proc = subprocess.run([target_py, "-I", str(Path(__file__).resolve()), *raw_argv], **run_kwargs)
+        except subprocess.TimeoutExpired as exc:
+            print(
+                f"MindIE setup reexec exceeded timeout={run_kwargs['timeout']}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
         return int(proc.returncode)
 
     if args.cmd == "init":

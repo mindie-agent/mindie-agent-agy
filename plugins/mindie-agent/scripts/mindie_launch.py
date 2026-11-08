@@ -7,12 +7,17 @@ and setup commands (`setup ...`) under explicit timeout budgets.
 
 [Invariants]
 - Enforces `HOOK_TOTAL = 10.0s >= HOOK_EXEC_BUDGET (8.0s) + CLEANUP_GRACE (2.0s)`.
+- Hook failures never emit `{}` with exit 0. `PreToolUse` bind errors deny the
+  call; other hook exceptions propagate to a non-zero process status.
 - If the configured profile interpreter differs from `sys.executable` on MCP
   launch, re-executes into the configured interpreter so `mindie_knowledge`,
   `remote_dev`, and `mindie_diagnostics` imports resolve deterministically.
 
 [Timeouts & Locks]
-- `HOOK_TOTAL = 10.0s`, `HOOK_LOCK_BUDGET = 2.0s`, `BOOTSTRAP_TOTAL = 540.0s`.
+- `HOOK_TOTAL = 10.0s`, `HOOK_LOCK_BUDGET = 2.0s`, `HOOK_UV_STARTUP = 5.0s`.
+- Hook re-exec uses `timeout=HOOK_TOTAL`; setup re-exec uses
+  `BOOTSTRAP_TOTAL + BOOTSTRAP_CLEANUP_GRACE`; MCP stdio has no timeout.
+- Outer `hooks.json` timeout is `HOOK_OUTER_SECONDS = HOOK_TOTAL + HOOK_UV_STARTUP`.
 
 [Side-Effect Policy]
 - Delegates hook and MCP execution to `bridge.py`, `mcp_server.py`, and `setup.py`.
@@ -33,7 +38,10 @@ from paths import apply_enterprise_transport_env, config_path, data_home, read_j
 
 HOOK_TOTAL = 10.0
 HOOK_LOCK_BUDGET = 2.0
+HOOK_UV_STARTUP = 5.0
+HOOK_OUTER_SECONDS = int(HOOK_TOTAL + HOOK_UV_STARTUP)
 BOOTSTRAP_TOTAL = 540.0
+BOOTSTRAP_CLEANUP_GRACE = 5.0
 
 
 def _norm_python_path(py_exe: str | Path) -> Path:
@@ -147,12 +155,21 @@ def main(argv: list[str] | None = None) -> int:
         import subprocess
 
         run_kwargs: dict = {"env": env}
+        if argv[0] == "hook":
+            run_kwargs["timeout"] = HOOK_TOTAL
         if os.name == "nt":
             run_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             run_kwargs["stdin"] = _reexec_stdio(sys.stdin)
             run_kwargs["stdout"] = _reexec_stdio(sys.stdout)
             run_kwargs["stderr"] = _reexec_stdio(sys.stderr)
-        proc = subprocess.run([target_py, "-I", str(target_script), *argv], **run_kwargs)
+        try:
+            proc = subprocess.run([target_py, "-I", str(target_script), *argv], **run_kwargs)
+        except subprocess.TimeoutExpired as exc:
+            print(
+                f"MindIE {argv[0]} reexec exceeded timeout={run_kwargs.get('timeout')}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
         return int(proc.returncode)
 
     role = argv[0]
@@ -160,13 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     if role == "hook":
         import bridge
 
-        try:
-            return bridge.main(rest)
-        except Exception as exc:
-            print(f"MindIE hook warning: {type(exc).__name__}: {exc}", file=sys.stderr)
-            sys.stdout.buffer.write(b"{}\n")
-            sys.stdout.buffer.flush()
-            return 0
+        return bridge.main(rest)
     if role == "mcp":
         import mcp_server
 

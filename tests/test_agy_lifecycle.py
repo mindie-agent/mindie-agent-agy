@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
+import sys
 import pytest
 
 import admission
@@ -208,3 +210,100 @@ def test_stop_never_forces_continuation_and_requires_manual_lease(tmp_path: Path
     assert forwarded["harness"] == "agy"
     assert forwarded["session_id"] == SESSION_A
     assert forwarded["transcript_path"] == str(transcript.resolve())
+
+
+def test_pre_tool_use_bind_failure_denies_and_exits_nonzero(tmp_path: Path, monkeypatch, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    event = {
+        "conversationId": SESSION_A,
+        "workspacePaths": [str(workspace)],
+        "stepIdx": 7,
+        "toolCall": {
+            "name": "mcp_mindie-remote-dev_remote_read",
+            "args": {"file_path": "/workspace/vllm_ascend/worker.py"},
+        },
+    }
+
+    def boom(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(bridge, "publish_bind", boom)
+    payload = bridge.handle_pre_tool_use(event)
+    assert payload["decision"] == "deny"
+    assert payload.get("decision") != "allow"
+    assert "OSError" in payload["reason"]
+    assert "No space left on device" in payload["reason"]
+
+    monkeypatch.setattr(sys, "stdin", type("Stdin", (), {"buffer": io.BytesIO(json.dumps(event).encode())})())
+    assert bridge.main(["pre-tool-use"]) == 1
+    emitted = json.loads(capsys.readouterr().out)
+    assert emitted["decision"] == "deny"
+    assert "OSError" in emitted["reason"]
+
+
+def test_hook_launcher_does_not_mask_exceptions_as_empty_success(monkeypatch, capsys):
+    import mindie_launch
+    import bridge as bridge_mod
+
+    monkeypatch.setattr(mindie_launch, "_preferred_python", lambda: None)
+
+    def boom(_argv=None):
+        raise RuntimeError("sqlite bind write failed")
+
+    monkeypatch.setattr(bridge_mod, "main", boom)
+    with pytest.raises(RuntimeError, match="sqlite bind write failed"):
+        mindie_launch.main(["hook", "pre-tool-use"])
+    captured = capsys.readouterr()
+    assert captured.out.strip() != "{}"
+    assert not captured.out.strip().endswith("{}")
+
+
+def test_stop_capture_handoff_failure_emits_system_message(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    brain_logs = tmp_path / "gemini" / "antigravity" / "brain" / SESSION_A / ".system_generated" / "logs"
+    brain_logs.mkdir(parents=True)
+    transcript = brain_logs / "transcript.jsonl"
+    transcript.write_text(
+        json.dumps(
+            {
+                "step_index": 0,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "status": "DONE",
+                "created_at": "2026-10-31T08:21:33Z",
+                "content": "<USER_REQUEST>\n/mindie-agent test\n</USER_REQUEST>",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    bridge.handle_pre_invocation(
+        {
+            "conversationId": SESSION_A,
+            "workspacePaths": [str(workspace)],
+            "lastUserInput": "/mindie-agent test",
+        }
+    )
+    setup.configure_community(enabled=True, fork="user/knowledge-vllm-ascend", project_root=workspace)
+
+    import mindie_knowledge.loop.cli as cli_mod
+
+    def boom(_engine_cfg, _payload):
+        raise RuntimeError("engine unavailable")
+
+    monkeypatch.setattr(cli_mod, "capture_hook", boom)
+    failed_stop = bridge.handle_stop(
+        {
+            "conversationId": SESSION_A,
+            "workspacePaths": [str(workspace)],
+            "transcriptPath": str(transcript),
+            "executionNum": 2,
+            "terminationReason": "NO_TOOL_CALL",
+        }
+    )
+    assert failed_stop.get("decision") != "continue"
+    assert failed_stop != {}
+    assert "RuntimeError" in failed_stop["systemMessage"]
+    assert "engine unavailable" in failed_stop["systemMessage"]

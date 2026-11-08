@@ -12,9 +12,12 @@ Implements Antigravity's native hook contracts (`hooks.json`), bridging
 - Lease Honesty: if `Admission.activate` succeeds on `/mindie-agent` in
   `PreInvocation` but background service readiness fails, the active lease is
   preserved (`status="degraded"` warning injected) rather than revoked.
+- `PreToolUse` bind failures return `"decision": "deny"` with the exception
+  and a non-zero hook exit; they never fall through to `"allow"`.
 - `Stop` never returns `"decision": "continue"` (never forces model
   continuation). Unactivated sessions short-circuit with `{}` before reading
-  sharing settings or transcripts.
+  sharing settings or transcripts. Capture failures emit a host-visible
+  `systemMessage` instead of an empty success object.
 
 [Timeouts & Locks]
 - Runs within `mindie_launch.py`'s `HOOK_TOTAL = 10.0s` budget; SQLite WAL
@@ -53,10 +56,14 @@ from paths import (
 )
 
 
-def _emit(payload: dict) -> int:
+def _emit(payload: dict, *, exit_code: int = 0) -> int:
     sys.stdout.buffer.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
     sys.stdout.buffer.flush()
-    return 0
+    return exit_code
+
+
+def _hook_failure_text(prefix: str, exc: BaseException) -> str:
+    return f"{prefix}: {type(exc).__name__}: {exc}"
 
 
 def _read_stdin_event() -> dict:
@@ -179,8 +186,12 @@ def handle_pre_tool_use(event: dict | None = None, *, config=None) -> dict:
             transcript_path=transcript_from_hook(event),
             config=config,
         )
+    except TimeoutError:
+        raise
     except Exception as exc:
-        print(f"MindIE PreToolUse bind warning: {type(exc).__name__}", file=sys.stderr)
+        detail = _hook_failure_text("PreToolUse bind failed", exc)
+        print(f"MindIE {detail}", file=sys.stderr)
+        return {"decision": "deny", "reason": detail}
     return {"decision": "allow"}
 
 
@@ -220,8 +231,10 @@ def handle_stop(event: dict | None = None, *, config=None) -> dict:
         source = capture_source(transcript, session, binding=lease)
     except TimeoutError:
         raise
-    except (OSError, ValueError):
-        return {}
+    except (OSError, ValueError) as exc:
+        detail = _hook_failure_text("Stop transcript capture failed", exc)
+        print(f"MindIE {detail}", file=sys.stderr)
+        return {"systemMessage": detail}
 
     exec_num = event.get("executionNum", 1)
     term_reason = event.get("terminationReason", "NO_TOOL_CALL")
@@ -239,8 +252,12 @@ def handle_stop(event: dict | None = None, *, config=None) -> dict:
         from mindie_knowledge.loop.cli import capture_hook
 
         capture_hook(str(engine_config_path(config)), forwarded)
+    except TimeoutError:
+        raise
     except Exception as exc:
-        print(f"MindIE Stop capture handoff warning: {type(exc).__name__}", file=sys.stderr)
+        detail = _hook_failure_text("Stop capture handoff failed", exc)
+        print(f"MindIE {detail}", file=sys.stderr)
+        return {"systemMessage": detail}
     return {}
 
 
@@ -254,7 +271,8 @@ def main(argv: list[str] | None = None) -> int:
     if op == "pre-invocation":
         return _emit(handle_pre_invocation())
     if op == "pre-tool-use":
-        return _emit(handle_pre_tool_use())
+        payload = handle_pre_tool_use()
+        return _emit(payload, exit_code=0 if payload.get("decision") == "allow" else 1)
     if op == "stop":
         return _emit(handle_stop())
     return _emit({})

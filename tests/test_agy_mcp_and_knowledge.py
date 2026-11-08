@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 import pytest
@@ -134,4 +135,37 @@ def test_knowledge_cli_explore_budget_and_rsi_wrappers(tmp_path: Path):
         )
         == 0
     )
+
+
+def test_mcp_parse_error_returns_jsonrpc_minus_32700_and_keeps_serving(monkeypatch):
+    class FakeIn:
+        def __iter__(self):
+            return iter(
+                [
+                    b"{not-json\n",
+                    b"\n",
+                    b'{"jsonrpc":"2.0","id":7,"method":"ping"}\n',
+                ]
+            )
+
+    written: list[bytes] = []
+
+    class FakeOut:
+        def write(self, data):
+            written.append(data)
+            return len(data)
+
+        def flush(self):
+            return None
+
+    monkeypatch.setattr(mcp_server.sys, "stdin", type("Stdin", (), {"buffer": FakeIn()})())
+    monkeypatch.setattr(mcp_server.sys, "stdout", type("Stdout", (), {"buffer": FakeOut()})())
+    assert mcp_server.serve("tools") == 0
+    frames = [json.loads(chunk) for chunk in written]
+    assert frames[0]["jsonrpc"] == "2.0"
+    assert frames[0]["id"] is None
+    assert frames[0]["error"]["code"] == -32700
+    assert "Parse error" in frames[0]["error"]["message"]
+    assert frames[1]["id"] == 7
+    assert frames[1]["result"] == {}
 

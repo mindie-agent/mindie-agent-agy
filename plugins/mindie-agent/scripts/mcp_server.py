@@ -17,6 +17,7 @@ and factual `mindie_status`).
   raises an `OSError` or `sqlite3.Error`, `isError` stays `False` and
   `receipt_warning` + `receipt_unconfirmed=True` are attached to
   `structuredContent` so the caller never blindly repeats a completed mutation.
+- Non-empty UTF-8/JSON parse failures return JSON-RPC `-32700` Parse error.
 
 [Timeouts & Locks]
 - Uses SQLite WAL mode with `busy_timeout=5000` (`timeout=5.0`) for
@@ -562,7 +563,28 @@ def serve(surface: str, *, config=None) -> int:
             continue
         try:
             req = json.loads(line.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            print(
+                f"MindIE MCP parse error: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            sys.stdout.buffer.write(
+                (
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": None,
+                            "error": {
+                                "code": -32700,
+                                "message": f"Parse error: {type(exc).__name__}: {exc}",
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+            sys.stdout.buffer.flush()
             continue
         resp = handle_rpc(req, surface, config=config, receipts=receipts)
         if resp is not None:
