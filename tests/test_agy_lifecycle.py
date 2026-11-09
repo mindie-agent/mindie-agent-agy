@@ -286,6 +286,27 @@ def test_status_facts_does_not_report_corrupt_community_as_disabled():
     assert facts["community_state"] == "corrupt"
 
 
+def test_status_facts_survives_community_metadata_permission_error(monkeypatch):
+    import paths as paths_mod
+
+    comm = Path(os.environ["MINDIE_AGENT_CONFIG"]).parent / "mindie-community.json"
+    comm.write_text("{}", encoding="utf-8")
+    real_read = paths_mod.read_json
+
+    def gated_read(path):
+        if Path(path) == comm:
+            raise PermissionError("community metadata not readable")
+        return real_read(path)
+
+    monkeypatch.setattr(admission, "read_json", gated_read)
+    monkeypatch.setattr(setup, "read_json", gated_read)
+    facts = admission.status_facts(SESSION_A)
+    assert facts["community_sharing_enabled"] is None
+    assert facts["community_sharing_enabled"] is not False
+    assert facts["repair_required"] is True
+    assert facts["community_state"] == "unreadable"
+
+
 def test_hook_launcher_does_not_mask_exceptions_as_empty_success(monkeypatch, capsys):
     import mindie_launch
     import bridge as bridge_mod

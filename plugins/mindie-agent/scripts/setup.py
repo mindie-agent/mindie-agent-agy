@@ -360,9 +360,9 @@ def ensure_default_profile(
 
 
 def _read_optional_json(path: Path) -> tuple[str, dict]:
-    if not path.exists():
-        return "missing", {}
     try:
+        if not path.exists():
+            return "missing", {}
         return "ok", read_json(path)
     except TimeoutError:
         raise
@@ -753,9 +753,10 @@ def main(argv: list[str] | None = None) -> int:
             run_kwargs["stderr"] = _reexec_stdio(sys.stderr)
         try:
             proc = subprocess.run([target_py, "-I", str(Path(__file__).resolve()), *raw_argv], **run_kwargs)
-        except subprocess.TimeoutExpired as exc:
+        except (subprocess.TimeoutExpired, TimeoutError) as exc:
             print(
-                f"MindIE setup reexec exceeded timeout={run_kwargs['timeout']}: {exc}",
+                f"MindIE setup reexec exceeded timeout={run_kwargs['timeout']}: "
+                f"{type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )
             return 1

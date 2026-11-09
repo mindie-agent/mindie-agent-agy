@@ -607,6 +607,38 @@ def test_stale_in_progress_without_live_pid_is_reclaimed(tmp_path, monkeypatch):
     assert still["pid"] == os.getpid()
 
 
+def test_pid_running_on_windows_does_not_use_os_kill_signal_zero(monkeypatch):
+    import ctypes
+    import component_update
+
+    monkeypatch.setattr(component_update.os, "name", "nt")
+
+    def boom_kill(*_args, **_kwargs):
+        raise ValueError("invalid signal")
+
+    monkeypatch.setattr(component_update.os, "kill", boom_kill)
+    opened: list[int] = []
+
+    class FakeKernel32:
+        def OpenProcess(self, _access, _inherit, pid):
+            opened.append(pid)
+            return 42
+
+        def GetExitCodeProcess(self, _handle, out):
+            out._obj.value = 259
+            return 1
+
+        def CloseHandle(self, _handle):
+            return 1
+
+    class FakeWindll:
+        kernel32 = FakeKernel32()
+
+    monkeypatch.setattr(ctypes, "windll", FakeWindll(), raising=False)
+    assert component_update._pid_running(4242) is True
+    assert opened == [4242]
+
+
 def test_inventory_read_failure_is_failed_not_up_to_date(tmp_path, monkeypatch):
     import component_update
     import setup
@@ -694,33 +726,68 @@ def test_configure_community_does_not_swallow_reporting_activation(tmp_path, mon
         )
 
 
-def test_hook_reexec_passes_hook_total_timeout_and_mcp_stays_unbounded(monkeypatch):
+def test_hook_reexec_passes_exec_budget_timeout_and_mcp_stays_unbounded(monkeypatch):
     import subprocess
     import mindie_launch
 
     seen: list[dict] = []
 
+    class FakeProc:
+        def __init__(self, argv, **kwargs):
+            self.pid = 2_000_000_001
+            self.returncode = 0
+            seen.append({"argv": list(argv), "kwargs": dict(kwargs), "mode": "popen"})
+
+        def wait(self, timeout=None):
+            seen[-1]["wait_timeout"] = timeout
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
     def fake_run(argv, **kwargs):
-        seen.append({"argv": list(argv), "timeout": kwargs.get("timeout")})
+        seen.append({"argv": list(argv), "timeout": kwargs.get("timeout"), "mode": "run"})
         return subprocess.CompletedProcess(argv, 0)
 
     monkeypatch.setattr(mindie_launch, "_preferred_python", lambda: "/tmp/other-python")
+    monkeypatch.setattr(subprocess, "Popen", FakeProc)
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert mindie_launch.main(["hook", "session-start"]) == 0
-    assert seen[0]["timeout"] == mindie_launch.HOOK_TOTAL
+    assert seen[0]["mode"] == "popen"
+    assert seen[0]["wait_timeout"] == mindie_launch.HOOK_EXEC_BUDGET
+    assert seen[0]["wait_timeout"] != mindie_launch.HOOK_TOTAL
+    assert seen[0]["kwargs"].get("start_new_session") is True
     assert mindie_launch.main(["mcp", "tools"]) == 0
+    assert seen[1]["mode"] == "run"
     assert seen[1]["timeout"] is None
+    assert mindie_launch.main(["setup", "init"]) == 0
+    assert seen[2]["mode"] == "popen"
+    assert seen[2]["wait_timeout"] == mindie_launch.BOOTSTRAP_TOTAL + mindie_launch.BOOTSTRAP_CLEANUP_GRACE
 
 
 def test_hook_reexec_timeout_emits_host_readable_json_and_exit_0(monkeypatch, capsys):
     import subprocess
     import mindie_launch
 
-    def boom(*_args, **_kwargs):
-        raise subprocess.TimeoutExpired(cmd=["python"], timeout=mindie_launch.HOOK_TOTAL)
+    class TimeoutProc:
+        def __init__(self, argv, **kwargs):
+            self.pid = 2_000_000_001
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd=["python"], timeout=timeout)
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
 
     monkeypatch.setattr(mindie_launch, "_preferred_python", lambda: "/tmp/other-python")
-    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr(subprocess, "Popen", TimeoutProc)
 
     assert mindie_launch.main(["hook", "pre-tool-use"]) == 0
     denied = json.loads(capsys.readouterr().out)
@@ -733,6 +800,35 @@ def test_hook_reexec_timeout_emits_host_readable_json_and_exit_0(monkeypatch, ca
     assert stopped.get("decision") != "continue"
     assert "injectSteps" in stopped
     assert "TimeoutExpired" in stopped["injectSteps"][0]["ephemeralMessage"]
+
+
+def test_hook_reexec_timeout_error_emits_host_readable_json_and_exit_0(monkeypatch, capsys):
+    import subprocess
+    import mindie_launch
+
+    class TimeoutProc:
+        def __init__(self, argv, **kwargs):
+            self.pid = 2_000_000_001
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            raise TimeoutError("reexec wait timed out")
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(mindie_launch, "_preferred_python", lambda: "/tmp/other-python")
+    monkeypatch.setattr(subprocess, "Popen", TimeoutProc)
+
+    assert mindie_launch.main(["hook", "pre-tool-use"]) == 0
+    denied = json.loads(capsys.readouterr().out)
+    assert denied["decision"] == "deny"
+    assert denied.get("decision") != "allow"
+    assert "TimeoutError" in denied["reason"]
+    assert "TimeoutExpired" not in denied["reason"]
 
 
 

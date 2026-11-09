@@ -11,8 +11,8 @@ lease management (`activate`, `deactivate`, `knowledge_lease`, `status_facts`).
 - `status_facts(session)` returns factual control-plane status without onboarding
   prompts (`first_use`, `next`, `recovery`) or implicit service activation.
   Damaged community config yields `community_sharing_enabled=None`, never
-  `False` (disabled). Corrupt/unreadable sharing files set
-  `repair_required=True` (same rule as `sharing_status`).
+  `False` (disabled). Permission/OS errors on community metadata do not abort
+  status. Corrupt/unreadable sharing files set `repair_required=True`.
 
 [Timeouts & Locks]
 - Uses `Admission`'s WAL + `5.0s` SQLite busy timeout.
@@ -128,7 +128,9 @@ def status_facts(session: str | None = None, *, config: str | Path | None = None
     if session is not None:
         try:
             lease = knowledge_lease(session, config=config)
-        except ValueError:
+        except TimeoutError:
+            raise
+        except (ValueError, OSError):
             lease = None
     consent_state = "unconfigured"
     cpath = consent_path(config)
@@ -136,7 +138,13 @@ def status_facts(session: str | None = None, *, config: str | Path | None = None
         try:
             cdata = read_json(cpath)
             consent_state = str(cdata.get("choice") or cdata.get("status") or "configured")
+        except TimeoutError:
+            raise
+        except FileNotFoundError:
+            consent_state = "unconfigured"
         except ValueError:
+            consent_state = "invalid"
+        except OSError:
             consent_state = "invalid"
     community_enabled = False
     comm_path = community_config_path(config)
@@ -152,12 +160,28 @@ def status_facts(session: str | None = None, *, config: str | Path | None = None
             community_enabled = None
     from setup import sharing_status
 
-    share = sharing_status(config)
+    try:
+        share = sharing_status(config)
+    except TimeoutError:
+        raise
+    except OSError as exc:
+        share = {
+            "community_state": "unreadable",
+            "diagnostics_state": "unreadable",
+            "repair_required": True,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    try:
+        engine_path = str(engine_config_path(config))
+    except TimeoutError:
+        raise
+    except (ValueError, OSError):
+        engine_path = str(cfg_file.with_name(cfg_file.stem + ".engine.json"))
     return dict(
         harness="antigravity",
         configured=configured,
         config_path=str(cfg_file),
-        engine_config_path=str(engine_config_path(config)),
+        engine_config_path=engine_path,
         activated=bool(lease is not None and lease.get("enabled") == 1),
         session_id=lease["session"] if lease else session,
         project_root=lease.get("project_root") if lease else None,
