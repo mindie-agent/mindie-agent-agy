@@ -85,6 +85,10 @@ def handle_session_start(event: dict | None = None, *, config=None) -> dict:
     update_warning = ""
     try:
         trigger_background_update_if_due(config=config)
+    except TimeoutError as exc:
+        detail = _hook_failure_text("background updater spawn failed", exc)
+        print(f"MindIE {detail}", file=sys.stderr)
+        return _hook_warning_steps(detail)
     except Exception as exc:
         update_warning = _hook_failure_text("background updater spawn failed", exc)
         print(f"MindIE {update_warning}", file=sys.stderr)

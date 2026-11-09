@@ -173,6 +173,38 @@ def test_mcp_parse_error_returns_jsonrpc_minus_32700_and_keeps_serving(monkeypat
     assert frames[1]["result"] == {}
 
 
+def test_mcp_non_object_frame_returns_invalid_request_and_keeps_serving(monkeypatch):
+    class FakeIn:
+        def __iter__(self):
+            return iter(
+                [
+                    b"[1,2]\n",
+                    b'"not-an-object"\n',
+                    b'{"jsonrpc":"2.0","id":8,"method":"ping"}\n',
+                ]
+            )
+
+    written: list[bytes] = []
+
+    class FakeOut:
+        def write(self, data):
+            written.append(data)
+            return len(data)
+
+        def flush(self):
+            return None
+
+    monkeypatch.setattr(mcp_server.sys, "stdin", type("Stdin", (), {"buffer": FakeIn()})())
+    monkeypatch.setattr(mcp_server.sys, "stdout", type("Stdout", (), {"buffer": FakeOut()})())
+    assert mcp_server.serve("tools") == 0
+    frames = [json.loads(chunk) for chunk in written]
+    assert frames[0]["error"]["code"] == -32600
+    assert "JSON object" in frames[0]["error"]["message"]
+    assert frames[1]["error"]["code"] == -32600
+    assert frames[2]["id"] == 8
+    assert frames[2]["result"] == {}
+
+
 def test_mcp_tools_call_survives_updater_spawn_failure(monkeypatch):
     monkeypatch.delenv("MINDIE_CONFIG_HOME", raising=False)
     monkeypatch.setenv("AGY_CONVERSATION_ID", SESSION_A)

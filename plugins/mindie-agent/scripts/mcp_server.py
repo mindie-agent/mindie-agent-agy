@@ -18,6 +18,7 @@ and factual `mindie_status`).
   `receipt_warning` + `receipt_unconfirmed=True` are attached to
   `structuredContent` so the caller never blindly repeats a completed mutation.
 - Non-empty UTF-8/JSON parse failures return JSON-RPC `-32700` Parse error.
+  Parsed non-object frames return `-32600` Invalid Request (never dropped).
 - Background updater spawn failure never aborts `tools/call` or the stdio loop.
 
 [Timeouts & Locks]
@@ -510,7 +511,11 @@ def call_remote_surface(
 
 def handle_rpc(request: dict, surface: str, *, config=None, receipts: RemoteReceipts | None = None) -> dict | None:
     if not isinstance(request, dict):
-        return None
+        return dict(
+            jsonrpc="2.0",
+            id=None,
+            error=dict(code=-32600, message="Invalid Request: MCP frame must be a JSON object"),
+        )
     method = request.get("method")
     req_id = request.get("id")
     params = request.get("params") if isinstance(request.get("params"), dict) else {}

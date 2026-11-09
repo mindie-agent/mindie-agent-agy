@@ -16,7 +16,8 @@ generation under `state_dir()/component-runtimes` without requiring a new
 - Background spawn writes `in_progress` with `pid` only after `Popen` returns;
   a stored `in_progress` whose pid is not running (including an unreaped
   zombie) is reaped and reclaimed instead of blocking the next check. Spawn
-  failure records `status="failed"` and raises.
+  failure records `status="failed"` and raises. Status-write failure after
+  spawn kills the untracked child so a later check cannot start a duplicate.
   `read_inventory` failure publishes `status="failed"` rather than `up_to_date`.
 - Never writes into `~/.gemini` and never activates a session lease.
 
@@ -137,7 +138,9 @@ def _pid_running_windows(pid: int) -> bool:
         finally:
             kernel32.CloseHandle(handle)
     except TimeoutError:
-        raise
+        return True
+    except OSError:
+        return True
     except Exception:
         return False
 
@@ -204,16 +207,28 @@ def trigger_background_update_if_due(*, config: str | Path | None = None) -> boo
             {"checked_at": now, "status": "in_progress", "pid": int(proc.pid)},
         )
     except TimeoutError as write_exc:
-        print(
-            f"MindIE background update status write timed out after spawn: {write_exc}",
-            file=sys.stderr,
-        )
+        _stop_untracked_updater(proc)
+        _record_background_update_failure(status_file, now, write_exc)
+        raise
     except OSError as write_exc:
+        _stop_untracked_updater(proc)
+        _record_background_update_failure(status_file, now, write_exc)
+        return False
+    return True
+
+
+def _stop_untracked_updater(proc) -> None:
+    from bounded import _kill_process_tree
+
+    try:
+        _kill_process_tree(proc, None, wait_timeout=0.5)
+    except TimeoutError:
+        raise
+    except OSError as exc:
         print(
-            f"MindIE background update status write failed after spawn: {type(write_exc).__name__}: {write_exc}",
+            f"MindIE untracked updater cleanup failed: {type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
-    return True
 
 
 def _norm_python_path(py_exe: str | Path) -> str:

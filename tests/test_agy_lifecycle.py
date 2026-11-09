@@ -422,6 +422,80 @@ def test_direct_hook_dispatch_denies_when_bind_exceeds_exec_budget(tmp_path, mon
     assert elapsed < 10.0
 
 
+def test_session_start_timeout_does_not_continue_to_lease(tmp_path, monkeypatch, capsys):
+    import mindie_launch
+    import bridge as bridge_mod
+
+    monkeypatch.setattr(mindie_launch, "_preferred_python", lambda: None)
+    monkeypatch.delenv("_MINDIE_AGY_HOOK_BUDGETED", raising=False)
+    lease_called: list[bool] = []
+
+    def boom_update(*_args, **_kwargs):
+        raise TimeoutError("updater spawn timed out")
+
+    def mark_lease(*_args, **_kwargs):
+        lease_called.append(True)
+        time.sleep(10.5)
+        return {
+            "enabled": 1,
+            "session": SESSION_A,
+            "project_root": str(tmp_path),
+            "token": "t",
+            "activated_at": 1,
+        }
+
+    monkeypatch.setattr(bridge_mod, "trigger_background_update_if_due", boom_update)
+    monkeypatch.setattr(bridge_mod, "knowledge_lease", mark_lease)
+    event = {"conversationId": SESSION_A, "workspacePaths": [str(tmp_path)]}
+    monkeypatch.setattr(sys, "stdin", type("Stdin", (), {"buffer": io.BytesIO(json.dumps(event).encode())})())
+    started = time.monotonic()
+    assert mindie_launch.main(["hook", "session-start"]) == 0
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.0
+    assert lease_called == []
+    payload = json.loads(capsys.readouterr().out)
+    assert "injectSteps" in payload
+    assert "TimeoutError" in payload["injectSteps"][0]["ephemeralMessage"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="direct-dispatch hook budget uses SIGALRM")
+def test_session_start_alarm_does_not_run_unbounded_lease(tmp_path, monkeypatch, capsys):
+    import mindie_launch
+    import bridge as bridge_mod
+
+    monkeypatch.setattr(mindie_launch, "_preferred_python", lambda: None)
+    monkeypatch.setattr(mindie_launch, "HOOK_EXEC_BUDGET", 0.2)
+    monkeypatch.delenv("_MINDIE_AGY_HOOK_BUDGETED", raising=False)
+    lease_called: list[bool] = []
+
+    def slow_update(*_args, **_kwargs):
+        time.sleep(0.35)
+        return False
+
+    def slow_lease(*_args, **_kwargs):
+        lease_called.append(True)
+        time.sleep(10.5)
+        return {
+            "enabled": 1,
+            "session": SESSION_A,
+            "project_root": str(tmp_path),
+            "token": "t",
+            "activated_at": 1,
+        }
+
+    monkeypatch.setattr(bridge_mod, "trigger_background_update_if_due", slow_update)
+    monkeypatch.setattr(bridge_mod, "knowledge_lease", slow_lease)
+    event = {"conversationId": SESSION_A, "workspacePaths": [str(tmp_path)]}
+    monkeypatch.setattr(sys, "stdin", type("Stdin", (), {"buffer": io.BytesIO(json.dumps(event).encode())})())
+    started = time.monotonic()
+    assert mindie_launch.main(["hook", "session-start"]) == 0
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.0
+    assert lease_called == []
+    payload = json.loads(capsys.readouterr().out)
+    assert "injectSteps" in payload
+
+
 def test_stop_capture_handoff_failure_uses_preinvocation_inject_field(tmp_path: Path, monkeypatch):
     workspace = tmp_path / "ws"
     workspace.mkdir()

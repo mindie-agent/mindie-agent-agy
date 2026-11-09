@@ -21,11 +21,11 @@ and setup commands (`setup ...`) under explicit timeout budgets.
 - `HOOK_EXEC_BUDGET = 8.0s`, `HOOK_CLEANUP_GRACE = 2.0s`, `HOOK_TOTAL = 10.0s`,
   `HOOK_LOCK_BUDGET = 2.0s`, `HOOK_UV_STARTUP = 5.0s`.
 - Hook re-exec uses `timeout=HOOK_EXEC_BUDGET` (not `HOOK_TOTAL`) so cleanup
-  can emit JSON; setup/update re-exec uses
-  `(cli --timeout or BOOTSTRAP_TOTAL) + 2 * BOOTSTRAP_CLEANUP_GRACE` (strictly
-  greater than setup.py's inner `timeout + BOOTSTRAP_CLEANUP_GRACE`);
-  MCP stdio has no timeout. Timed re-exec kills the process tree (POSIX
-  group / Windows Job) then emits JSON so grandchildren are not left as zombies.
+  can emit JSON; setup outer re-exec covers sequential prep + nested re-exec
+  (`inner + (inner + CLEANUP_GRACE) + CLEANUP_GRACE`); update stays
+  `inner + 2 * CLEANUP_GRACE`. MCP stdio has no timeout. Timed re-exec kills
+  the process tree (POSIX group / Windows Job) then emits JSON so
+  grandchildren are not left as zombies.
 - Outer `hooks.json` timeout is `HOOK_OUTER_SECONDS = HOOK_TOTAL + HOOK_UV_STARTUP`.
 
 [Side-Effect Policy]
@@ -136,12 +136,20 @@ def _parse_cli_timeout(argv: list[str]) -> float | None:
     return None
 
 
+def _setup_outer_budget(inner: float) -> float:
+    """Wall-clock for sequential `ensure_runtime_python` then nested setup re-exec."""
+    nested = inner + BOOTSTRAP_CLEANUP_GRACE
+    return inner + nested + BOOTSTRAP_CLEANUP_GRACE
+
+
 def _timeout_role_budget(role: str, argv: list[str] | None = None) -> float | None:
     if role == "hook":
         return HOOK_EXEC_BUDGET
-    if role in {"setup", "update"}:
-        requested = _parse_cli_timeout(argv or [])
-        inner = BOOTSTRAP_TOTAL if requested is None else requested
+    requested = _parse_cli_timeout(argv or [])
+    inner = BOOTSTRAP_TOTAL if requested is None else requested
+    if role == "setup":
+        return _setup_outer_budget(inner)
+    if role == "update":
         return inner + (2 * BOOTSTRAP_CLEANUP_GRACE)
     return None
 
