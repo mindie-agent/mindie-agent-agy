@@ -21,7 +21,7 @@
           {
             "type": "command",
             "command": "uv run --no-project --python 3.13 python -B ./scripts/mindie_launch.py hook pre-tool-use",
-            "timeout": 10
+            "timeout": 15
           }
         ]
       }

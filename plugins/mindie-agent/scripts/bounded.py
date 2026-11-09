@@ -54,7 +54,7 @@ class ProcessResult:
         return self.stdout
 
 
-def _kill_process_tree(proc: subprocess.Popen, job_handle=None) -> bool:
+def _kill_process_tree(proc: subprocess.Popen, job_handle=None, *, wait_timeout: float = 2.0) -> bool:
     cleanup_failed = False
     if job_handle is not None and os.name == "nt":
         try:
@@ -66,6 +66,12 @@ def _kill_process_tree(proc: subprocess.Popen, job_handle=None) -> bool:
             job_handle = None
         except Exception:
             cleanup_failed = True
+            try:
+                import ctypes
+
+                ctypes.windll.kernel32.TerminateJobObject(job_handle, 1)
+            except Exception:
+                pass
     if proc.poll() is None:
         if os.name == "nt":
             try:
@@ -79,10 +85,22 @@ def _kill_process_tree(proc: subprocess.Popen, job_handle=None) -> bool:
                 pass
             except OSError:
                 cleanup_failed = True
+            try:
+                os.kill(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                pass
     try:
-        proc.wait(timeout=2.0)
-    except subprocess.TimeoutExpired:
+        proc.wait(timeout=wait_timeout)
+    except (subprocess.TimeoutExpired, TimeoutError):
         cleanup_failed = True
+    else:
+        if os.name != "nt":
+            try:
+                os.waitpid(proc.pid, os.WNOHANG)
+            except (ChildProcessError, OSError):
+                pass
     return cleanup_failed
 
 

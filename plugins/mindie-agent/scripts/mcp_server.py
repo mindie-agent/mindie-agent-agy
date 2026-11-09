@@ -17,6 +17,9 @@ and factual `mindie_status`).
   raises an `OSError` or `sqlite3.Error`, `isError` stays `False` and
   `receipt_warning` + `receipt_unconfirmed=True` are attached to
   `structuredContent` so the caller never blindly repeats a completed mutation.
+- Non-empty UTF-8/JSON parse failures return JSON-RPC `-32700` Parse error.
+  Parsed non-object frames return `-32600` Invalid Request (never dropped).
+- Background updater spawn failure never aborts `tools/call` or the stdio loop.
 
 [Timeouts & Locks]
 - Uses SQLite WAL mode with `busy_timeout=5000` (`timeout=5.0`) for
@@ -508,7 +511,11 @@ def call_remote_surface(
 
 def handle_rpc(request: dict, surface: str, *, config=None, receipts: RemoteReceipts | None = None) -> dict | None:
     if not isinstance(request, dict):
-        return None
+        return dict(
+            jsonrpc="2.0",
+            id=None,
+            error=dict(code=-32600, message="Invalid Request: MCP frame must be a JSON object"),
+        )
     method = request.get("method")
     req_id = request.get("id")
     params = request.get("params") if isinstance(request.get("params"), dict) else {}
@@ -531,7 +538,13 @@ def handle_rpc(request: dict, surface: str, *, config=None, receipts: RemoteRece
         tools = remote_catalog() if surface == "remote" else tools_catalog()
         return dict(jsonrpc="2.0", id=req_id, result=dict(tools=tools))
     if method == "tools/call":
-        trigger_background_update_if_due(config=config)
+        try:
+            trigger_background_update_if_due(config=config)
+        except Exception as exc:
+            print(
+                f"MindIE background updater spawn failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
         name = params.get("name")
         arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
         if not isinstance(name, str) or not name:
@@ -562,7 +575,28 @@ def serve(surface: str, *, config=None) -> int:
             continue
         try:
             req = json.loads(line.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            print(
+                f"MindIE MCP parse error: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            sys.stdout.buffer.write(
+                (
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": None,
+                            "error": {
+                                "code": -32700,
+                                "message": f"Parse error: {type(exc).__name__}: {exc}",
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+            sys.stdout.buffer.flush()
             continue
         resp = handle_rpc(req, surface, config=config, receipts=receipts)
         if resp is not None:

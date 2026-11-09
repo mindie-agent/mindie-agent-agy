@@ -13,6 +13,12 @@ generation under `state_dir()/component-runtimes` without requiring a new
 - Atomic Profile Rebinding: `agy.json` and `agy.engine.json` are updated via
   `atomic_write_json` (`os.replace()`) only after the candidate generation passes
   `runtime_inventory` lock and VCS receipt verification.
+- Background spawn writes `in_progress` with `pid` only after `Popen` returns;
+  a stored `in_progress` whose pid is not running (including an unreaped
+  zombie) is reaped and reclaimed instead of blocking the next check. Spawn
+  failure records `status="failed"` and raises. Status-write failure after
+  spawn kills the untracked child so a later check cannot start a duplicate.
+  `read_inventory` failure publishes `status="failed"` rather than `up_to_date`.
 - Never writes into `~/.gemini` and never activates a session lease.
 
 [Timeouts & Locks]
@@ -57,24 +63,113 @@ UPDATE_CHECK_INTERVAL = 300.0
 UPDATE_FAILURE_BACKOFF = 60.0
 
 
+def _record_background_update_failure(status_file: Path, checked_at: float, exc: BaseException) -> None:
+    detail = f"{type(exc).__name__}: {exc}"
+    print(f"MindIE background component update failed to start: {detail}", file=sys.stderr)
+    try:
+        atomic_write_json(
+            status_file,
+            {"checked_at": checked_at, "status": "failed", "error": detail},
+        )
+    except TimeoutError:
+        raise
+    except OSError as write_exc:
+        print(
+            f"MindIE background update status write failed: {type(write_exc).__name__}: {write_exc}",
+            file=sys.stderr,
+        )
+
+
+def _pid_running(pid) -> bool:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if os.name == "nt":
+        return _pid_running_windows(int(pid))
+    try:
+        reaped, _status = os.waitpid(pid, os.WNOHANG)
+        if reaped == pid:
+            return False
+    except TimeoutError:
+        raise
+    except ChildProcessError:
+        pass
+    except OSError:
+        pass
+    try:
+        os.kill(pid, 0)
+    except TimeoutError:
+        raise
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _pid_running_windows(pid: int) -> bool:
+    """Return whether `pid` is alive. Query failure must not raise or fake 'dead'."""
+    import ctypes
+    from ctypes import wintypes
+
+    error_access_denied = 5
+    process_query_limited_information = 0x1000
+    process_query_information = 0x0400
+    still_active = 259
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            handle = kernel32.OpenProcess(process_query_information, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == error_access_denied
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return int(code.value) == still_active
+        finally:
+            kernel32.CloseHandle(handle)
+    except TimeoutError:
+        return True
+    except OSError:
+        return True
+    except Exception:
+        return False
+
+
 def trigger_background_update_if_due(*, config: str | Path | None = None) -> bool:
     """Spawn a non-blocking background `component_update.py` check if the interval has elapsed."""
     if os.environ.get("MINDIE_CONFIG_HOME") is not None:
         return False
-    try:
-        cfg_file = config_path(config)
-        if not cfg_file.is_file():
+    cfg_file = config_path(config)
+    if not cfg_file.is_file():
+        return False
+    status_file = data_home() / "component-update-status.json"
+    now = time.time()
+    if status_file.is_file():
+        data = read_json(status_file)
+        checked = float(data.get("checked_at") or 0.0)
+        st = data.get("status")
+        if st == "in_progress" and _pid_running(data.get("pid")):
             return False
-        status_file = data_home() / "component-update-status.json"
-        now = time.time()
-        if status_file.is_file():
-            data = read_json(status_file)
-            checked = float(data.get("checked_at") or 0.0)
-            st = data.get("status")
-            interval = UPDATE_FAILURE_BACKOFF if st == "failed" else UPDATE_CHECK_INTERVAL
-            if now - checked < interval:
-                return False
-        atomic_write_json(status_file, {"checked_at": now, "status": "in_progress"})
+        if st == "in_progress":
+            print(
+                "MindIE background updater pid is not running; reclaiming leftover in_progress",
+                file=sys.stderr,
+            )
+        elif st == "failed" and now - checked < UPDATE_FAILURE_BACKOFF:
+            return False
+        elif st != "failed" and now - checked < UPDATE_CHECK_INTERVAL:
+            return False
+    try:
         adapter = read_json(cfg_file)
         py_exe = adapter.get("python") or sys.executable
         env = apply_enterprise_transport_env(dict(os.environ))
@@ -96,10 +191,44 @@ def trigger_background_update_if_due(*, config: str | Path | None = None) -> boo
             )
         else:
             kwargs["start_new_session"] = True
-        subprocess.Popen([str(py_exe), "-I", str(Path(__file__).resolve()), "--config", str(cfg_file)], **kwargs)
-        return True
-    except Exception:
+        proc = subprocess.Popen(
+            [str(py_exe), "-I", str(Path(__file__).resolve()), "--config", str(cfg_file)],
+            **kwargs,
+        )
+    except TimeoutError as exc:
+        _record_background_update_failure(status_file, now, exc)
+        raise
+    except Exception as exc:
+        _record_background_update_failure(status_file, now, exc)
+        raise
+    try:
+        atomic_write_json(
+            status_file,
+            {"checked_at": now, "status": "in_progress", "pid": int(proc.pid)},
+        )
+    except TimeoutError as write_exc:
+        _stop_untracked_updater(proc)
+        _record_background_update_failure(status_file, now, write_exc)
+        raise
+    except OSError as write_exc:
+        _stop_untracked_updater(proc)
+        _record_background_update_failure(status_file, now, write_exc)
         return False
+    return True
+
+
+def _stop_untracked_updater(proc) -> None:
+    from bounded import _kill_process_tree
+
+    try:
+        _kill_process_tree(proc, None, wait_timeout=0.5)
+    except TimeoutError:
+        raise
+    except OSError as exc:
+        print(
+            f"MindIE untracked updater cleanup failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
 
 
 def _norm_python_path(py_exe: str | Path) -> str:
@@ -251,6 +380,7 @@ def check(
             pass
         raise
 
+    inventory_error = None
     if artifact is not None:
         new_python = _norm_python_path(artifact["python"])
         updated_adapter = dict(adapter)
@@ -275,8 +405,25 @@ def check(
         active_python = _norm_python_path(current_python)
         try:
             installed = read_inventory(active_python, timeout=15.0)
-        except Exception:
+        except TimeoutError as exc:
+            inventory_error = f"{type(exc).__name__}: {exc}"
+            try:
+                atomic_write_json(
+                    status_file,
+                    {
+                        "checked_at": time.time(),
+                        "status": "failed",
+                        "error": inventory_error,
+                        "python": active_python,
+                    },
+                )
+            except OSError:
+                pass
+            raise
+        except Exception as exc:
+            status = "failed"
             installed = {}
+            inventory_error = f"{type(exc).__name__}: {exc}"
 
     result: dict = dict(
         schema="mindie-component-update/1",
@@ -285,6 +432,8 @@ def check(
         python=active_python,
         installed=installed,
     )
+    if inventory_error is not None:
+        result["inventory_error"] = inventory_error
     if sync_feeds and community_config_path(cfg_file).is_file() and eng_file.is_file():
         try:
             from mindie_knowledge.loop.cli import sync_feeds as run_sync_feeds
@@ -293,14 +442,14 @@ def check(
         except Exception as exc:
             result["feed_sync_error"] = f"{type(exc).__name__}: {exc}"
     try:
-        atomic_write_json(
-            status_file,
-            {
-                "checked_at": time.time(),
-                "status": status,
-                "python": active_python,
-            },
-        )
+        status_payload = {
+            "checked_at": time.time(),
+            "status": status,
+            "python": active_python,
+        }
+        if inventory_error is not None:
+            status_payload["error"] = inventory_error
+        atomic_write_json(status_file, status_payload)
     except OSError:
         pass
     return result
@@ -331,7 +480,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     sys.stdout.buffer.write((json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
     sys.stdout.buffer.flush()
-    return 0
+    return 0 if payload.get("status") in {"updated", "up_to_date"} else 1
 
 
 if __name__ == "__main__":

@@ -12,9 +12,16 @@ Implements Antigravity's native hook contracts (`hooks.json`), bridging
 - Lease Honesty: if `Admission.activate` succeeds on `/mindie-agent` in
   `PreInvocation` but background service readiness fails, the active lease is
   preserved (`status="degraded"` warning injected) rather than revoked.
+- `PreToolUse` bind failures, including `TimeoutError`, return
+  `"decision": "deny"` with the exception and exit 0 so the host consumes
+  stdout; raising or a non-zero exit would drop the JSON and fail-open.
+  They never fall through to `"allow"`.
 - `Stop` never returns `"decision": "continue"` (never forces model
   continuation). Unactivated sessions short-circuit with `{}` before reading
-  sharing settings or transcripts.
+  sharing settings or transcripts. Capture failures, including `TimeoutError`,
+  emit `injectSteps.ephemeralMessage` (the same host field as `PreInvocation`).
+- Background updater spawn failure is stderr + `injectSteps`; it never
+  aborts `SessionStart` with empty stdout.
 
 [Timeouts & Locks]
 - Runs within `mindie_launch.py`'s `HOOK_TOTAL = 10.0s` budget; SQLite WAL
@@ -53,10 +60,18 @@ from paths import (
 )
 
 
-def _emit(payload: dict) -> int:
+def _emit(payload: dict, *, exit_code: int = 0) -> int:
     sys.stdout.buffer.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
     sys.stdout.buffer.flush()
-    return 0
+    return exit_code
+
+
+def _hook_failure_text(prefix: str, exc: BaseException) -> str:
+    return f"{prefix}: {type(exc).__name__}: {exc}"
+
+
+def _hook_warning_steps(detail: str) -> dict:
+    return {"injectSteps": [{"ephemeralMessage": detail}]}
 
 
 def _read_stdin_event() -> dict:
@@ -67,26 +82,36 @@ def _read_stdin_event() -> dict:
 def handle_session_start(event: dict | None = None, *, config=None) -> dict:
     """`SessionStart` hook: passive by default; never activates a knowledge lease."""
     event = _read_stdin_event() if event is None else event
-    trigger_background_update_if_due(config=config)
+    update_warning = ""
+    try:
+        trigger_background_update_if_due(config=config)
+    except TimeoutError as exc:
+        detail = _hook_failure_text("background updater spawn failed", exc)
+        print(f"MindIE {detail}", file=sys.stderr)
+        return _hook_warning_steps(detail)
+    except Exception as exc:
+        update_warning = _hook_failure_text("background updater spawn failed", exc)
+        print(f"MindIE {update_warning}", file=sys.stderr)
     try:
         session = session_from_hook(event)
     except ValueError:
-        return {}
+        return _hook_warning_steps(update_warning) if update_warning else {}
     lease = knowledge_lease(session, config=config)
     if lease is None:
-        return {}
-    return {
-        "injectSteps": [
-            {
-                "systemMessage": {
-                    "systemMessage": (
-                        f"MindIE Agent knowledge lease is active for conversation {session} "
-                        f"(project_root={lease.get('project_root')})."
-                    )
-                }
+        return _hook_warning_steps(update_warning) if update_warning else {}
+    steps = [
+        {
+            "systemMessage": {
+                "systemMessage": (
+                    f"MindIE Agent knowledge lease is active for conversation {session} "
+                    f"(project_root={lease.get('project_root')})."
+                )
             }
-        ]
-    }
+        }
+    ]
+    if update_warning:
+        steps.append({"ephemeralMessage": update_warning})
+    return {"injectSteps": steps}
 
 
 def handle_pre_invocation(event: dict | None = None, *, config=None) -> dict:
@@ -180,7 +205,9 @@ def handle_pre_tool_use(event: dict | None = None, *, config=None) -> dict:
             config=config,
         )
     except Exception as exc:
-        print(f"MindIE PreToolUse bind warning: {type(exc).__name__}", file=sys.stderr)
+        detail = _hook_failure_text("PreToolUse bind failed", exc)
+        print(f"MindIE {detail}", file=sys.stderr)
+        return {"decision": "deny", "reason": detail}
     return {"decision": "allow"}
 
 
@@ -218,10 +245,10 @@ def handle_stop(event: dict | None = None, *, config=None) -> dict:
         return {}
     try:
         source = capture_source(transcript, session, binding=lease)
-    except TimeoutError:
-        raise
-    except (OSError, ValueError):
-        return {}
+    except (TimeoutError, OSError, ValueError) as exc:
+        detail = _hook_failure_text("Stop transcript capture failed", exc)
+        print(f"MindIE {detail}", file=sys.stderr)
+        return _hook_warning_steps(detail)
 
     exec_num = event.get("executionNum", 1)
     term_reason = event.get("terminationReason", "NO_TOOL_CALL")
@@ -240,7 +267,9 @@ def handle_stop(event: dict | None = None, *, config=None) -> dict:
 
         capture_hook(str(engine_config_path(config)), forwarded)
     except Exception as exc:
-        print(f"MindIE Stop capture handoff warning: {type(exc).__name__}", file=sys.stderr)
+        detail = _hook_failure_text("Stop capture handoff failed", exc)
+        print(f"MindIE {detail}", file=sys.stderr)
+        return _hook_warning_steps(detail)
     return {}
 
 
