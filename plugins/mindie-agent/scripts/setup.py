@@ -411,6 +411,16 @@ def sharing_status(config: str | Path | None = None) -> dict:
         reporting_enabled = False
     else:
         reporting_enabled = None
+    raw_roots = comm_data.get("project_roots") if community_state == "ok" else []
+    if isinstance(raw_roots, list) and all(isinstance(item, str) for item in raw_roots):
+        project_roots = raw_roots
+    elif community_state == "ok" and raw_roots not in (None, []):
+        community_state = "corrupt"
+        sharing_enabled = None
+        repair_required = True
+        project_roots = []
+    else:
+        project_roots = []
     needs_onboarding_prompt = (not repair_required) and (choice not in {"contribute", "disabled"})
     return {
         "schema": "mindie-sharing-status/1",
@@ -426,7 +436,7 @@ def sharing_status(config: str | Path | None = None) -> dict:
         "repository": comm_data.get("repository") if community_state == "ok" else None,
         "fork": comm_data.get("fork") if community_state == "ok" else None,
         "account": comm_data.get("account") if community_state == "ok" else None,
-        "project_roots": list(comm_data.get("project_roots") or []) if community_state == "ok" else [],
+        "project_roots": project_roots,
         "needs_onboarding_prompt": needs_onboarding_prompt,
         "repair_required": repair_required,
     }

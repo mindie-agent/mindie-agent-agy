@@ -164,13 +164,15 @@ def status_facts(session: str | None = None, *, config: str | Path | None = None
         share = sharing_status(config)
     except TimeoutError:
         raise
-    except OSError as exc:
+    except (ValueError, TypeError, OSError, KeyError) as exc:
         share = {
             "community_state": "unreadable",
             "diagnostics_state": "unreadable",
             "repair_required": True,
             "error": f"{type(exc).__name__}: {exc}",
         }
+    if share.get("community_state") not in {"ok", "missing"}:
+        community_enabled = None
     try:
         engine_path = str(engine_config_path(config))
     except TimeoutError:

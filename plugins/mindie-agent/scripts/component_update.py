@@ -82,20 +82,7 @@ def _pid_running(pid) -> bool:
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
     if os.name == "nt":
-        import ctypes
-
-        process_query_limited_information = 0x1000
-        still_active = 259
-        handle = ctypes.windll.kernel32.OpenProcess(process_query_limited_information, False, int(pid))
-        if not handle:
-            return False
-        try:
-            code = ctypes.c_ulong()
-            if ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) == 0:
-                return False
-            return int(code.value) == still_active
-        finally:
-            ctypes.windll.kernel32.CloseHandle(handle)
+        return _pid_running_windows(int(pid))
     try:
         os.kill(pid, 0)
     except TimeoutError:
@@ -107,6 +94,41 @@ def _pid_running(pid) -> bool:
     except OSError:
         return False
     return True
+
+
+def _pid_running_windows(pid: int) -> bool:
+    """Return whether `pid` is alive. Query failure must not raise or fake 'dead'."""
+    import ctypes
+    from ctypes import wintypes
+
+    error_access_denied = 5
+    process_query_limited_information = 0x1000
+    process_query_information = 0x0400
+    still_active = 259
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            handle = kernel32.OpenProcess(process_query_information, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == error_access_denied
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return int(code.value) == still_active
+        finally:
+            kernel32.CloseHandle(handle)
+    except TimeoutError:
+        raise
+    except Exception:
+        return False
 
 
 def trigger_background_update_if_due(*, config: str | Path | None = None) -> bool:

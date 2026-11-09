@@ -19,9 +19,11 @@ and setup commands (`setup ...`) under explicit timeout budgets.
 - `HOOK_EXEC_BUDGET = 8.0s`, `HOOK_CLEANUP_GRACE = 2.0s`, `HOOK_TOTAL = 10.0s`,
   `HOOK_LOCK_BUDGET = 2.0s`, `HOOK_UV_STARTUP = 5.0s`.
 - Hook re-exec uses `timeout=HOOK_EXEC_BUDGET` (not `HOOK_TOTAL`) so cleanup
-  can emit JSON; setup/update re-exec uses `BOOTSTRAP_TOTAL + BOOTSTRAP_CLEANUP_GRACE`;
+  can emit JSON; setup/update re-exec uses
+  `BOOTSTRAP_TOTAL + 2 * BOOTSTRAP_CLEANUP_GRACE` (strictly greater than
+  setup.py's inner `BOOTSTRAP_TIMEOUT + BOOTSTRAP_CLEANUP_GRACE`);
   MCP stdio has no timeout. Timed re-exec kills the process tree (POSIX
-  group / Windows Job) so grandchildren are not left as zombies.
+  group / Windows Job) then emits JSON so grandchildren are not left as zombies.
 - Outer `hooks.json` timeout is `HOOK_OUTER_SECONDS = HOOK_TOTAL + HOOK_UV_STARTUP`.
 
 [Side-Effect Policy]
@@ -119,7 +121,7 @@ def _timeout_role_budget(role: str) -> float | None:
     if role == "hook":
         return HOOK_EXEC_BUDGET
     if role in {"setup", "update"}:
-        return BOOTSTRAP_TOTAL + BOOTSTRAP_CLEANUP_GRACE
+        return BOOTSTRAP_TOTAL + (2 * BOOTSTRAP_CLEANUP_GRACE)
     return None
 
 
@@ -163,7 +165,7 @@ def _reexec(target_py: str, target_script: Path, argv: list[str], env: dict) -> 
         try:
             return int(proc.wait(timeout=timeout))
         except (subprocess.TimeoutExpired, TimeoutError) as exc:
-            _kill_process_tree(proc, job)
+            _kill_process_tree(proc, job, wait_timeout=min(0.5, HOOK_CLEANUP_GRACE))
             return _emit_reexec_timeout(argv, exc)
     except (subprocess.TimeoutExpired, TimeoutError) as exc:
         return _emit_reexec_timeout(argv, exc)

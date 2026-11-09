@@ -619,24 +619,60 @@ def test_pid_running_on_windows_does_not_use_os_kill_signal_zero(monkeypatch):
     monkeypatch.setattr(component_update.os, "kill", boom_kill)
     opened: list[int] = []
 
+    class FakeApi:
+        def __init__(self, fn):
+            self.fn = fn
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, *args, **kwargs):
+            return self.fn(*args, **kwargs)
+
     class FakeKernel32:
-        def OpenProcess(self, _access, _inherit, pid):
+        def __init__(self):
+            self.last_error = 0
+            self.OpenProcess = FakeApi(self._open)
+            self.GetExitCodeProcess = FakeApi(self._exit)
+            self.CloseHandle = FakeApi(lambda _h: 1)
+
+        def _open(self, _access, _inherit, pid):
             opened.append(pid)
             return 42
 
-        def GetExitCodeProcess(self, _handle, out):
+        def _exit(self, _handle, out):
             out._obj.value = 259
             return 1
 
-        def CloseHandle(self, _handle):
-            return 1
-
-    class FakeWindll:
-        kernel32 = FakeKernel32()
-
-    monkeypatch.setattr(ctypes, "windll", FakeWindll(), raising=False)
+    fake = FakeKernel32()
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_a, **_k: fake, raising=False)
     assert component_update._pid_running(4242) is True
     assert opened == [4242]
+
+
+def test_pid_running_windows_access_denied_counts_as_alive(monkeypatch):
+    import ctypes
+    import component_update
+
+    monkeypatch.setattr(component_update.os, "name", "nt")
+
+    class FakeApi:
+        def __init__(self, fn):
+            self.fn = fn
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, *args, **kwargs):
+            return self.fn(*args, **kwargs)
+
+    class FakeKernel32:
+        def __init__(self):
+            self.OpenProcess = FakeApi(lambda *_a, **_k: 0)
+            self.GetExitCodeProcess = FakeApi(lambda *_a, **_k: 0)
+            self.CloseHandle = FakeApi(lambda *_a, **_k: 1)
+
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_a, **_k: FakeKernel32(), raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5, raising=False)
+    assert component_update._pid_running(4242) is True
 
 
 def test_inventory_read_failure_is_failed_not_up_to_date(tmp_path, monkeypatch):
@@ -765,7 +801,11 @@ def test_hook_reexec_passes_exec_budget_timeout_and_mcp_stays_unbounded(monkeypa
     assert seen[1]["timeout"] is None
     assert mindie_launch.main(["setup", "init"]) == 0
     assert seen[2]["mode"] == "popen"
-    assert seen[2]["wait_timeout"] == mindie_launch.BOOTSTRAP_TOTAL + mindie_launch.BOOTSTRAP_CLEANUP_GRACE
+    import setup as setup_mod
+
+    inner_setup = setup_mod.BOOTSTRAP_TIMEOUT + setup_mod.BOOTSTRAP_CLEANUP_GRACE
+    assert seen[2]["wait_timeout"] == mindie_launch.BOOTSTRAP_TOTAL + (2 * mindie_launch.BOOTSTRAP_CLEANUP_GRACE)
+    assert seen[2]["wait_timeout"] > inner_setup
 
 
 def test_hook_reexec_timeout_emits_host_readable_json_and_exit_0(monkeypatch, capsys):

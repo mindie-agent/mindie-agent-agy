@@ -286,6 +286,15 @@ def test_status_facts_does_not_report_corrupt_community_as_disabled():
     assert facts["community_state"] == "corrupt"
 
 
+def test_status_facts_survives_invalid_community_metadata_types():
+    comm = Path(os.environ["MINDIE_AGENT_CONFIG"]).parent / "mindie-community.json"
+    comm.write_text(json.dumps({"enabled": True, "project_roots": 123}), encoding="utf-8")
+    facts = admission.status_facts(SESSION_A)
+    assert facts["repair_required"] is True
+    assert facts["community_state"] == "corrupt"
+    assert facts["community_sharing_enabled"] is None
+
+
 def test_status_facts_survives_community_metadata_permission_error(monkeypatch):
     import paths as paths_mod
 
