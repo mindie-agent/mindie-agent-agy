@@ -122,8 +122,43 @@ def deactivate(session: str, *, config: str | Path | None = None) -> dict:
 
 def status_facts(session: str | None = None, *, config: str | Path | None = None) -> dict:
     """Return factual control-plane status without onboarding prompts or activation."""
+    try:
+        return _status_facts_body(session, config=config)
+    except TimeoutError:
+        raise
+    except OSError:
+        cfg = ""
+        try:
+            cfg = str(config_path(config))
+        except TimeoutError:
+            raise
+        except OSError:
+            pass
+        return dict(
+            harness="antigravity",
+            configured=False,
+            config_path=cfg,
+            engine_config_path="",
+            activated=False,
+            session_id=session,
+            project_root=None,
+            activated_at=None,
+            consent_choice="invalid",
+            community_sharing_enabled=None,
+            community_state="unreadable",
+            diagnostics_state="unreadable",
+            repair_required=True,
+        )
+
+
+def _status_facts_body(session: str | None = None, *, config: str | Path | None = None) -> dict:
     cfg_file = config_path(config)
-    configured = cfg_file.is_file()
+    try:
+        configured = cfg_file.is_file()
+    except TimeoutError:
+        raise
+    except OSError:
+        configured = False
     lease = None
     if session is not None:
         try:
@@ -134,7 +169,14 @@ def status_facts(session: str | None = None, *, config: str | Path | None = None
             lease = None
     consent_state = "unconfigured"
     cpath = consent_path(config)
-    if cpath.is_file():
+    try:
+        consent_present = cpath.is_file()
+    except TimeoutError:
+        raise
+    except OSError:
+        consent_state = "invalid"
+        consent_present = False
+    if consent_present:
         try:
             cdata = read_json(cpath)
             consent_state = str(cdata.get("choice") or cdata.get("status") or "configured")
@@ -148,7 +190,14 @@ def status_facts(session: str | None = None, *, config: str | Path | None = None
             consent_state = "invalid"
     community_enabled = False
     comm_path = community_config_path(config)
-    if comm_path.is_file():
+    try:
+        community_present = comm_path.is_file()
+    except TimeoutError:
+        raise
+    except OSError:
+        community_enabled = None
+        community_present = False
+    if community_present:
         try:
             comm_data = read_json(comm_path)
             community_enabled = bool(comm_data.get("enabled"))

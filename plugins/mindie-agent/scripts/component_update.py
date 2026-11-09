@@ -14,8 +14,9 @@ generation under `state_dir()/component-runtimes` without requiring a new
   `atomic_write_json` (`os.replace()`) only after the candidate generation passes
   `runtime_inventory` lock and VCS receipt verification.
 - Background spawn writes `in_progress` with `pid` only after `Popen` returns;
-  a stored `in_progress` whose pid is not running is reclaimed instead of
-  blocking the next check. Spawn failure records `status="failed"` and raises.
+  a stored `in_progress` whose pid is not running (including an unreaped
+  zombie) is reaped and reclaimed instead of blocking the next check. Spawn
+  failure records `status="failed"` and raises.
   `read_inventory` failure publishes `status="failed"` rather than `up_to_date`.
 - Never writes into `~/.gemini` and never activates a session lease.
 
@@ -83,6 +84,16 @@ def _pid_running(pid) -> bool:
         return False
     if os.name == "nt":
         return _pid_running_windows(int(pid))
+    try:
+        reaped, _status = os.waitpid(pid, os.WNOHANG)
+        if reaped == pid:
+            return False
+    except TimeoutError:
+        raise
+    except ChildProcessError:
+        pass
+    except OSError:
+        pass
     try:
         os.kill(pid, 0)
     except TimeoutError:

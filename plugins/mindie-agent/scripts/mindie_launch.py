@@ -7,6 +7,8 @@ and setup commands (`setup ...`) under explicit timeout budgets.
 
 [Invariants]
 - Enforces `HOOK_TOTAL = 10.0s >= HOOK_EXEC_BUDGET (8.0s) + CLEANUP_GRACE (2.0s)`.
+  Direct-dispatch hooks (no interpreter re-exec) are still bounded by
+  `HOOK_EXEC_BUDGET`; over-budget work emits host JSON and exits 0.
 - Hook failures never emit `{}` with exit 0. `PreToolUse` bind errors deny the
   call. Hook re-exec `TimeoutExpired` and `TimeoutError` emit host-readable
   JSON and exit 0 (`PreToolUse` deny; other hooks `injectSteps.ephemeralMessage`);
@@ -20,8 +22,8 @@ and setup commands (`setup ...`) under explicit timeout budgets.
   `HOOK_LOCK_BUDGET = 2.0s`, `HOOK_UV_STARTUP = 5.0s`.
 - Hook re-exec uses `timeout=HOOK_EXEC_BUDGET` (not `HOOK_TOTAL`) so cleanup
   can emit JSON; setup/update re-exec uses
-  `BOOTSTRAP_TOTAL + 2 * BOOTSTRAP_CLEANUP_GRACE` (strictly greater than
-  setup.py's inner `BOOTSTRAP_TIMEOUT + BOOTSTRAP_CLEANUP_GRACE`);
+  `(cli --timeout or BOOTSTRAP_TOTAL) + 2 * BOOTSTRAP_CLEANUP_GRACE` (strictly
+  greater than setup.py's inner `timeout + BOOTSTRAP_CLEANUP_GRACE`);
   MCP stdio has no timeout. Timed re-exec kills the process tree (POSIX
   group / Windows Job) then emits JSON so grandchildren are not left as zombies.
 - Outer `hooks.json` timeout is `HOOK_OUTER_SECONDS = HOOK_TOTAL + HOOK_UV_STARTUP`.
@@ -117,12 +119,57 @@ def _reexec_stdio(stream):
         return subprocess.DEVNULL
 
 
-def _timeout_role_budget(role: str) -> float | None:
+def _parse_cli_timeout(argv: list[str]) -> float | None:
+    for index, token in enumerate(argv):
+        raw = None
+        if token == "--timeout" and index + 1 < len(argv):
+            raw = argv[index + 1]
+        elif token.startswith("--timeout="):
+            raw = token.split("=", 1)[1]
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            return None
+        return value if value > 0 else None
+    return None
+
+
+def _timeout_role_budget(role: str, argv: list[str] | None = None) -> float | None:
     if role == "hook":
         return HOOK_EXEC_BUDGET
     if role in {"setup", "update"}:
-        return BOOTSTRAP_TOTAL + (2 * BOOTSTRAP_CLEANUP_GRACE)
+        requested = _parse_cli_timeout(argv or [])
+        inner = BOOTSTRAP_TOTAL if requested is None else requested
+        return inner + (2 * BOOTSTRAP_CLEANUP_GRACE)
     return None
+
+
+def _run_hook_with_exec_budget(argv: list[str], rest: list[str]) -> int:
+    """Bound in-process hook dispatch to HOOK_EXEC_BUDGET (POSIX SIGALRM)."""
+    import signal
+    import bridge
+
+    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
+        return bridge.main(rest)
+
+    def _on_alarm(_signum, _frame):
+        raise TimeoutError(f"hook exec exceeded HOOK_EXEC_BUDGET={HOOK_EXEC_BUDGET}s")
+
+    previous = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _on_alarm)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, float(HOOK_EXEC_BUDGET))
+        try:
+            return int(bridge.main(rest))
+        except TimeoutError as exc:
+            return _emit_reexec_timeout(argv, exc)
+    finally:
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0.0)
+        finally:
+            signal.signal(signal.SIGALRM, previous)
 
 
 def _emit_reexec_timeout(argv: list[str], exc: BaseException) -> int:
@@ -144,7 +191,7 @@ def _emit_reexec_timeout(argv: list[str], exc: BaseException) -> int:
 def _reexec(target_py: str, target_script: Path, argv: list[str], env: dict) -> int:
     from bounded import _attach_windows_job, _kill_process_tree
 
-    timeout = _timeout_role_budget(argv[0])
+    timeout = _timeout_role_budget(argv[0], argv)
     cmd = [target_py, "-I", str(target_script), *argv]
     popen_kwargs: dict = {"env": env}
     if os.name == "nt":
@@ -215,6 +262,8 @@ def main(argv: list[str] | None = None) -> int:
             env["PYTHONIOENCODING"] = "utf-8"
             if argv[0] in {"hook", "mcp"}:
                 env["AGY_PLUGIN_ROOT"] = str(target_script.parent.parent)
+            if argv[0] == "hook":
+                env["_MINDIE_AGY_HOOK_BUDGETED"] = "1"
             return _reexec(target_py, target_script, argv, env)
     except TimeoutError as exc:
         return _emit_reexec_timeout(argv, exc)
@@ -224,6 +273,15 @@ def main(argv: list[str] | None = None) -> int:
     if role == "hook":
         import bridge
 
+        budgeted = os.environ.get("_MINDIE_AGY_HOOK_BUDGETED") == "1"
+        if os.name == "nt" and not budgeted and os.environ.get("_MINDIE_AGY_REEXEC") != "1":
+            env = dict(os.environ)
+            env["_MINDIE_AGY_HOOK_BUDGETED"] = "1"
+            env["_MINDIE_AGY_REEXEC"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
+            return _reexec(sys.executable, Path(__file__).resolve(), argv, env)
+        if os.name != "nt" and not budgeted:
+            return _run_hook_with_exec_budget(argv, rest)
         return bridge.main(rest)
     if role == "mcp":
         import mcp_server

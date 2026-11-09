@@ -607,6 +607,67 @@ def test_stale_in_progress_without_live_pid_is_reclaimed(tmp_path, monkeypatch):
     assert still["pid"] == os.getpid()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX zombie waitpid reap")
+def test_zombie_in_progress_pid_is_reaped_and_allows_retry(tmp_path, monkeypatch):
+    import json as json_mod
+    import subprocess
+    import sys
+    import time
+    import component_update
+    import paths
+
+    cfg_file = tmp_path / "agy.json"
+    cfg_file.write_text(json_mod.dumps({"python": sys.executable}), encoding="utf-8")
+    monkeypatch.delenv("MINDIE_CONFIG_HOME", raising=False)
+    status_file = paths.data_home() / "component-update-status.json"
+    status_file.parent.mkdir(parents=True, exist_ok=True)
+    zombie = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
+    deadline = time.monotonic() + 2.0
+    saw_zombie = False
+    while time.monotonic() < deadline:
+        proc_status = Path(f"/proc/{zombie.pid}/status")
+        if proc_status.is_file():
+            text = proc_status.read_text(encoding="utf-8")
+            if "\nState:\tZ" in text:
+                saw_zombie = True
+                break
+        else:
+            try:
+                os.kill(zombie.pid, 0)
+                time.sleep(0.05)
+                saw_zombie = True
+                break
+            except ProcessLookupError:
+                break
+        time.sleep(0.02)
+    if not saw_zombie:
+        pytest.skip("could not observe unreaped child")
+    os.kill(zombie.pid, 0)
+    status_file.write_text(
+        json_mod.dumps(
+            {
+                "checked_at": time.time() - 86400,
+                "status": "in_progress",
+                "pid": zombie.pid,
+            }
+        ),
+        encoding="utf-8",
+    )
+    spawned: list[int] = []
+
+    class FakeProc:
+        def __init__(self, argv, **kwargs):
+            self.pid = 4243
+            spawned.append(self.pid)
+
+    monkeypatch.setattr(subprocess, "Popen", FakeProc)
+    assert component_update.trigger_background_update_if_due(config=cfg_file) is True
+    assert spawned == [4243]
+    updated = json_mod.loads(status_file.read_text(encoding="utf-8"))
+    assert updated["status"] == "in_progress"
+    assert updated["pid"] == 4243
+
+
 def test_pid_running_on_windows_does_not_use_os_kill_signal_zero(monkeypatch):
     import ctypes
     import component_update
@@ -806,6 +867,47 @@ def test_hook_reexec_passes_exec_budget_timeout_and_mcp_stays_unbounded(monkeypa
     inner_setup = setup_mod.BOOTSTRAP_TIMEOUT + setup_mod.BOOTSTRAP_CLEANUP_GRACE
     assert seen[2]["wait_timeout"] == mindie_launch.BOOTSTRAP_TOTAL + (2 * mindie_launch.BOOTSTRAP_CLEANUP_GRACE)
     assert seen[2]["wait_timeout"] > inner_setup
+    assert mindie_launch.main(["setup", "--timeout", "700", "init"]) == 0
+    assert seen[3]["mode"] == "popen"
+    assert seen[3]["wait_timeout"] == 700 + (2 * mindie_launch.BOOTSTRAP_CLEANUP_GRACE)
+    assert seen[3]["wait_timeout"] != mindie_launch.BOOTSTRAP_TOTAL + (2 * mindie_launch.BOOTSTRAP_CLEANUP_GRACE)
+    assert seen[3]["wait_timeout"] > 700 + setup_mod.BOOTSTRAP_CLEANUP_GRACE
+    assert mindie_launch.main(["update", "--timeout", "700"]) == 0
+    assert seen[4]["wait_timeout"] == 700 + (2 * mindie_launch.BOOTSTRAP_CLEANUP_GRACE)
+
+
+def test_setup_inner_reexec_uses_cli_timeout(monkeypatch):
+    import importlib.util
+    import subprocess
+    import sys
+    import setup as setup_mod
+
+    seen: list[float | None] = []
+    real_find = importlib.util.find_spec
+
+    def gated_find(name, *args, **kwargs):
+        if name == "mindie_knowledge":
+            return None
+        return real_find(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", gated_find)
+    monkeypatch.setattr(
+        setup_mod,
+        "ensure_runtime_python",
+        lambda *a, **k: seen.append(k.get("timeout")) or sys.executable,
+    )
+    monkeypatch.setattr(setup_mod, "stage_source_baseline", lambda *_a, **_k: Path("/tmp/agy-source"))
+
+    def fake_run(argv, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.delenv("_MINDIE_AGY_SETUP_BOOTSTRAPPED", raising=False)
+    assert setup_mod.main(["--timeout", "700", "init"]) == 0
+    assert seen[0] == 700
+    assert seen[1] == 700 + setup_mod.BOOTSTRAP_CLEANUP_GRACE
+    assert seen[1] != setup_mod.BOOTSTRAP_TIMEOUT + setup_mod.BOOTSTRAP_CLEANUP_GRACE
 
 
 def test_hook_reexec_timeout_emits_host_readable_json_and_exit_0(monkeypatch, capsys):

@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 import pytest
 
 import admission
@@ -316,6 +317,60 @@ def test_status_facts_survives_community_metadata_permission_error(monkeypatch):
     assert facts["community_state"] == "unreadable"
 
 
+def test_status_surfaces_survive_stat_permission_error(tmp_path, monkeypatch):
+    import mcp_server
+
+    comm = Path(os.environ["MINDIE_AGENT_CONFIG"]).parent / "mindie-community.json"
+    comm.write_text("{}", encoding="utf-8")
+    orig_stat = Path.stat
+
+    def gated_stat(self, *args, **kwargs):
+        if self.name == "mindie-community.json":
+            raise PermissionError("stat denied")
+        return orig_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", gated_stat)
+    facts = admission.status_facts(SESSION_A)
+    assert facts["community_sharing_enabled"] is None
+    assert facts["community_sharing_enabled"] is not False
+    assert facts["repair_required"] is True
+    assert facts["community_state"] == "unreadable"
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    status_out = bridge.handle_pre_invocation(
+        {
+            "conversationId": SESSION_A,
+            "workspacePaths": [str(workspace)],
+            "lastUserInput": "/mindie-agent status",
+        }
+    )
+    assert "injectSteps" in status_out
+    message = status_out["injectSteps"][0]["ephemeralMessage"]
+    assert "unreadable" in message
+    assert "PermissionError" not in message or "repair_required" in message
+    reported = json.loads(message.split("MindIE factual status: ", 1)[1])
+    assert reported["repair_required"] is True
+    assert reported["community_state"] == "unreadable"
+    assert reported["community_sharing_enabled"] is None
+
+    monkeypatch.setenv("AGY_CONVERSATION_ID", SESSION_A)
+    resp = mcp_server.handle_rpc(
+        {
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {"name": "mindie_status", "arguments": {}},
+        },
+        "tools",
+    )
+    assert "error" not in resp
+    mcp_facts = resp["result"]["structuredContent"]
+    assert mcp_facts["repair_required"] is True
+    assert mcp_facts["community_state"] == "unreadable"
+    assert mcp_facts["community_sharing_enabled"] is None
+
+
 def test_hook_launcher_does_not_mask_exceptions_as_empty_success(monkeypatch, capsys):
     import mindie_launch
     import bridge as bridge_mod
@@ -331,6 +386,40 @@ def test_hook_launcher_does_not_mask_exceptions_as_empty_success(monkeypatch, ca
     captured = capsys.readouterr()
     assert captured.out.strip() != "{}"
     assert not captured.out.strip().endswith("{}")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="direct-dispatch hook budget uses SIGALRM")
+def test_direct_hook_dispatch_denies_when_bind_exceeds_exec_budget(tmp_path, monkeypatch, capsys):
+    import mindie_launch
+    import bridge as bridge_mod
+
+    monkeypatch.setattr(mindie_launch, "_preferred_python", lambda: None)
+    monkeypatch.setattr(mindie_launch, "HOOK_EXEC_BUDGET", 0.2)
+    monkeypatch.delenv("_MINDIE_AGY_HOOK_BUDGETED", raising=False)
+
+    def slow_bind(*_args, **_kwargs):
+        time.sleep(10.25)
+        return "bind-id"
+
+    monkeypatch.setattr(bridge_mod, "publish_bind", slow_bind)
+    event = {
+        "conversationId": SESSION_A,
+        "workspacePaths": [str(tmp_path)],
+        "stepIdx": 7,
+        "toolCall": {
+            "name": "mcp_mindie-remote-dev_remote_read",
+            "args": {"file_path": "/workspace/vllm_ascend/worker.py"},
+        },
+    }
+    monkeypatch.setattr(sys, "stdin", type("Stdin", (), {"buffer": io.BytesIO(json.dumps(event).encode())})())
+    started = time.monotonic()
+    assert mindie_launch.main(["hook", "pre-tool-use"]) == 0
+    elapsed = time.monotonic() - started
+    denied = json.loads(capsys.readouterr().out)
+    assert denied["decision"] == "deny"
+    assert denied.get("decision") != "allow"
+    assert elapsed < 2.0
+    assert elapsed < 10.0
 
 
 def test_stop_capture_handoff_failure_uses_preinvocation_inject_field(tmp_path: Path, monkeypatch):
