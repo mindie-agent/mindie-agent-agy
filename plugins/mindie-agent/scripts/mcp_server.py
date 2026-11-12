@@ -27,8 +27,8 @@ and factual `mindie_status`).
 - Enforces `remote_timeout(name, args) = max(minimum, inner_wait + 60.0s grace)`.
 
 [Side-Effect Policy]
-- `initialize` and `tools/list` are pure in-memory catalog operations that
-  never touch disk or start background services.
+- `initialize` and `tools/list` read the selected release without knowledge
+  authorization or service admission.
 """
 
 from __future__ import annotations
@@ -43,6 +43,10 @@ import sqlite3
 import sys
 import time
 import uuid
+
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 
 from admission import status_facts
 from bounded import run as bounded_run
@@ -536,7 +540,8 @@ def handle_rpc(request: dict, surface: str, *, config=None, receipts: RemoteRece
             result=dict(
                 protocolVersion=params.get("protocolVersion") or "2024-11-05",
                 capabilities=dict(tools=dict(listChanged=False)),
-                serverInfo=dict(name=f"mindie-agy-{surface}", version="0.1.2"),
+                serverInfo=dict(name=f"mindie-agy-{surface}",
+                                version=read_json(Path(__file__).parent.parent / "plugin.json")["version"]),
             ),
         )
     if method == "tools/list":
@@ -613,6 +618,12 @@ def serve(surface: str, *, config=None) -> int:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     surface = argv[0] if argv else "tools"
+    if "--once" not in argv:
+        from remote_dev.mcp.catalog_refresh import profile_selection, serve_selected
+        return serve_selected(lambda: profile_selection(
+            config_path(), Path(__file__).resolve().parent, surface,
+            config_env="MINDIE_AGENT_CONFIG", plugin_env="AGY_PLUGIN_ROOT",
+        ))
     return serve(surface)
 
 
