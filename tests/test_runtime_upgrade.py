@@ -57,7 +57,10 @@ def test_old_runtime_pair_survives_prepare_failure_and_upgrades(tmp_path, monkey
         # Component generations contain long third-party package paths and read-only git packfiles on Windows.
         raw = str(resolved)
         rm_target = (raw if raw.startswith("\\\\?\\") else f"\\\\?\\{raw}") if os.name == "nt" else resolved
-        shutil.rmtree(rm_target, onexc=_force_writable)
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(rm_target, onexc=_force_writable)
+        else:
+            shutil.rmtree(rm_target, onerror=_force_writable)
 
     request.addfinalizer(clean_native_directory)
     home, config_home, data_home = (tmp_path / name for name in ("home", "config", "data"))

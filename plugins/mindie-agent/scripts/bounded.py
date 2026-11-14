@@ -191,7 +191,9 @@ def _kill_process_tree(proc: subprocess.Popen, job_handle=None, *, wait_timeout:
                         stderr=subprocess.DEVNULL,
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                     )
-                    tk_proc.wait(timeout=tk_budget)
+                    tk_rc = tk_proc.wait(timeout=tk_budget)
+                    if tk_rc not in {0, 128}:
+                        cleanup_failed = True
                 except (subprocess.TimeoutExpired, TimeoutError):
                     cleanup_failed = True
                     remaining_budget = max(0.0, remaining_budget - tk_budget)
@@ -201,7 +203,7 @@ def _kill_process_tree(proc: subprocess.Popen, job_handle=None, *, wait_timeout:
                             tk_proc.kill()
                             if kill_budget > 0:
                                 tk_proc.wait(timeout=kill_budget)
-                        except (subprocess.TimeoutExpired, OSError):
+                        except (subprocess.TimeoutExpired, TimeoutError, OSError):
                             remaining_budget = max(0.0, remaining_budget - kill_budget)
                 except OSError:
                     cleanup_failed = True
@@ -318,6 +320,12 @@ def run(
                         cleanup_failed = _kill_process_tree(proc, job_handle)
                         job_handle = None
                         raise TimeoutError(f"process timed out after {timeout:.2f}s: {argv[0]}")
+                    if (stdout_path.exists() and stdout_path.stat().st_size > max_output) or (
+                        stderr_path.exists() and stderr_path.stat().st_size > max_output
+                    ):
+                        cleanup_failed = _kill_process_tree(proc, job_handle)
+                        job_handle = None
+                        raise OutputLimitExceeded(f"process output exceeded {max_output} bytes")
                     time.sleep(min(0.02, max(0.001, remaining)))
             finally:
                 if proc.poll() is None:
@@ -331,7 +339,7 @@ def run(
 
     cleanup_failed = cleanup_failed or Path(tmp_dir).exists()
     result = ProcessResult(
-        returncode=int(proc.returncode or 0),
+        returncode=int(proc.returncode if proc.returncode is not None else -1),
         stdout=stdout_str,
         stderr=stderr_str,
         elapsed_ms=elapsed_ms,

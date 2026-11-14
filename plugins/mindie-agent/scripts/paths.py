@@ -63,17 +63,44 @@ def _win32_tool_candidates(cmd: str) -> list[Path]:
     return out
 
 
+def _is_wsl_windows_shim(path_str: str) -> bool:
+    lower = path_str.lower()
+    if lower.endswith((".exe", ".cmd", ".bat", ".ps1", ".com")):
+        return True
+    if not _WSL_MOUNT_RE.match(path_str):
+        return False
+    p = Path(path_str)
+    if Path(f"{path_str}.cmd").is_file() or Path(f"{path_str}.exe").is_file():
+        return True
+    try:
+        with p.open("rb") as fh:
+            head = fh.read(512)
+    except TimeoutError:
+        raise
+    except OSError:
+        return True
+    if head.startswith(b"MZ"):
+        return True
+    if head.startswith(b"#!"):
+        if b"\r" in head.splitlines(True)[0]:
+            return True
+        lowered_head = head.lower()
+        if b".exe" in lowered_head or b"basedir=" in lowered_head:
+            return True
+    return False
+
+
 def which_native(cmd: str, path: str | None = None) -> str | None:
-    """Resolve `cmd` without picking Windows `/mnt/<drive>` shims on WSL2 or WindowsApps 0-byte stubs."""
+    """Resolve `cmd` without picking Windows PE/CRLF/cmd-shim stubs on WSL2 or WindowsApps 0-byte stubs."""
     search_path = os.environ.get("PATH", "") if path is None else path
     if _is_wsl():
-        filtered = os.pathsep.join(
-            entry for entry in search_path.split(os.pathsep) if entry and not _WSL_MOUNT_RE.match(entry)
-        )
-        found = shutil.which(cmd, path=filtered)
-        if found and (found.lower().endswith(".exe") or _WSL_MOUNT_RE.match(found)):
-            return None
-        return found
+        for entry in search_path.split(os.pathsep):
+            if not entry:
+                continue
+            found = shutil.which(cmd, path=entry)
+            if found and not _is_wsl_windows_shim(found):
+                return found
+        return None
     found = shutil.which(cmd, path=search_path)
     if os.name == "nt" and found:
         try:

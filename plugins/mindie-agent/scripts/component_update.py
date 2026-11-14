@@ -35,12 +35,15 @@ generation under `state_dir()/component-runtimes` without requiring a new
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import time
+
+_REAL_OS = os
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -145,6 +148,59 @@ def _pid_running_windows(pid: int) -> bool:
         return False
 
 
+@contextlib.contextmanager
+def _status_file_lock(status_file: Path, *, timeout: float = 2.0):
+    """Synchronize `component-update-status.json` updates across parent and child."""
+    lock_path = status_file.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = _REAL_OS.open(str(lock_path), _REAL_OS.O_CREAT | _REAL_OS.O_RDWR, 0o600)
+    locked = False
+    deadline = time.monotonic() + max(0.05, float(timeout))
+    try:
+        if _REAL_OS.name == "nt":
+            import msvcrt
+
+            if _REAL_OS.fstat(fd).st_size == 0:
+                _REAL_OS.write(fd, b"\0")
+            while True:
+                _REAL_OS.lseek(fd, 0, _REAL_OS.SEEK_SET)
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    locked = True
+                    break
+                except OSError as exc:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"timed out acquiring {lock_path.name}") from exc
+                    time.sleep(0.01)
+        else:
+            import fcntl
+
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"timed out acquiring {lock_path.name}") from exc
+                    time.sleep(0.01)
+        yield
+    finally:
+        try:
+            if locked:
+                if _REAL_OS.name == "nt":
+                    import msvcrt
+
+                    _REAL_OS.lseek(fd, 0, _REAL_OS.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            _REAL_OS.close(fd)
+
+
 def trigger_background_update_if_due(*, config: str | Path | None = None) -> bool:
     """Spawn a non-blocking background `component_update.py` check if the interval has elapsed."""
     if os.environ.get("MINDIE_CONFIG_HOME") is not None:
@@ -154,21 +210,22 @@ def trigger_background_update_if_due(*, config: str | Path | None = None) -> boo
         return False
     status_file = data_home() / "component-update-status.json"
     now = time.time()
-    if status_file.is_file():
-        data = read_json(status_file)
-        checked = float(data.get("checked_at") or 0.0)
-        st = data.get("status")
-        if st == "in_progress" and _pid_running(data.get("pid")):
-            return False
-        if st == "in_progress":
-            print(
-                "MindIE background updater pid is not running; reclaiming leftover in_progress",
-                file=sys.stderr,
-            )
-        elif st == "failed" and now - checked < UPDATE_FAILURE_BACKOFF:
-            return False
-        elif st != "failed" and now - checked < UPDATE_CHECK_INTERVAL:
-            return False
+    with _status_file_lock(status_file):
+        if status_file.is_file():
+            data = read_json(status_file)
+            checked = float(data.get("checked_at") or 0.0)
+            st = data.get("status")
+            if st == "in_progress" and _pid_running(data.get("pid")):
+                return False
+            if st == "in_progress":
+                print(
+                    "MindIE background updater pid is not running; reclaiming leftover in_progress",
+                    file=sys.stderr,
+                )
+            elif st == "failed" and now - checked < UPDATE_FAILURE_BACKOFF:
+                return False
+            elif st != "failed" and now - checked < UPDATE_CHECK_INTERVAL:
+                return False
     try:
         adapter = read_json(cfg_file)
         py_exe = adapter.get("python") or sys.executable
@@ -202,10 +259,20 @@ def trigger_background_update_if_due(*, config: str | Path | None = None) -> boo
         _record_background_update_failure(status_file, now, exc)
         raise
     try:
-        atomic_write_json(
-            status_file,
-            {"checked_at": now, "status": "in_progress", "pid": int(proc.pid)},
-        )
+        with _status_file_lock(status_file):
+            already_done = False
+            if status_file.is_file():
+                try:
+                    cur = read_json(status_file)
+                    if cur.get("status") in {"updated", "up_to_date"} and float(cur.get("checked_at") or 0.0) >= now:
+                        already_done = True
+                except (OSError, ValueError):
+                    pass
+            if not already_done:
+                atomic_write_json(
+                    status_file,
+                    {"checked_at": now, "status": "in_progress", "pid": int(proc.pid)},
+                )
     except TimeoutError as write_exc:
         _stop_untracked_updater(proc)
         _record_background_update_failure(status_file, now, write_exc)
@@ -481,7 +548,8 @@ def check(
         elif result.get("receipt_unconfirmed"):
             status_payload["receipt_warning"] = result.get("receipt_warning")
             status_payload["receipt_unconfirmed"] = True
-        atomic_write_json(status_file, status_payload)
+        with _status_file_lock(status_file):
+            atomic_write_json(status_file, status_payload)
     except (TimeoutError, OSError) as exc:
         if isinstance(exc, TimeoutError) and status != "updated":
             raise

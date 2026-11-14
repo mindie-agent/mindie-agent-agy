@@ -264,3 +264,69 @@ def test_powershell_activation_syntax_bom_input_proxy_tunnel_and_cleanup_budget(
     assert failed is True
     assert sum(waits) <= 2.0 + 1e-6
 
+
+def test_windows_sac_component_module_dispatch_and_wsl_cmd_shim_rejection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from types import SimpleNamespace
+    import subprocess
+    import mcp_server
+
+    # 1. On Windows (Smart App Control), `.exe` console-script trampolines resolve to `python -I -X utf8 -m <module>`,
+    #    and every mapped module (`mindie_profiler`, `mindie_sim`, `mindie_coordinator.cli`, `mindie_debugger.cli`,
+    #    `npu_top`) executes `--help` cleanly under `-I -X utf8`.
+    expected_modules = {
+        "profiler": "mindie_profiler",
+        "sim": "mindie_sim",
+        "coordinator": "mindie_coordinator.cli",
+        "debugger": "mindie_debugger.cli",
+        "npu_top": "npu_top",
+    }
+    cfg = tmp_path / "agy_sac.json"
+    cfg.write_text(json.dumps({"python": sys.executable}), encoding="utf-8")
+    with pytest.MonkeyPatch.context() as mp_ctx:
+        mp_ctx.setattr(mcp_server, "os", SimpleNamespace(name="nt", environ=os.environ, pathsep=os.pathsep))
+        mp_ctx.setattr(mcp_server, "which_native", lambda name, path=None: f"C:\\venv\\Scripts\\{name}.exe")
+        for comp, mod_name in expected_modules.items():
+            resolved_cmd = mcp_server._resolve_component_command(comp, config=cfg)
+            assert resolved_cmd == [sys.executable, "-I", "-X", "utf8", "-m", mod_name]
+            proc = subprocess.run(
+                [*resolved_cmd, "--help"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=15.0,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+            )
+            assert proc.returncode == 0, f"{comp} ({mod_name}) --help failed: {proc.stderr}"
+
+    # 2. WSL2 per-directory `which_native` rejects LF npm `cmd-shim` files on `/mnt/c/...` while preserving native Linux tools.
+    wsl_npm_dir = tmp_path / "mnt_c_npm_lf"
+    wsl_linux_dir = tmp_path / "linux_native"
+    wsl_npm_dir.mkdir()
+    wsl_linux_dir.mkdir()
+    lf_shim = wsl_npm_dir / "codebuddy"
+    lf_shim.write_bytes(b"#!/bin/sh\nbasedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")\nexec \"$basedir/node.exe\" \"$@\"\n")
+    (wsl_npm_dir / "codebuddy.cmd").write_bytes(b"@ECHO off\r\n")
+    native_bin = wsl_linux_dir / "codebuddy"
+    native_bin.write_bytes(b"#!/bin/sh\nexit 0\n")
+    if os.name != "nt":
+        lf_shim.chmod(0o755)
+        native_bin.chmod(0o755)
+
+    assert paths._is_wsl_windows_shim("/mnt/c/Users/dev/AppData/Roaming/npm/codebuddy.cmd") is True
+    with pytest.MonkeyPatch.context() as mp_ctx:
+        mp_ctx.setattr(paths, "_WSL_MOUNT_RE", paths.re.compile(rf"^(?:{paths.re.escape(str(wsl_npm_dir))}|/mnt/[a-zA-Z])(?:/|\\|$)"))
+        assert paths._is_wsl_windows_shim(str(lf_shim)) is True
+        assert paths._is_wsl_windows_shim(str(native_bin)) is False
+        mp_ctx.setattr(paths, "_is_wsl", lambda: True)
+        if os.name == "nt":
+            mp_ctx.setattr(
+                paths.shutil,
+                "which",
+                lambda cmd, path=None: str(Path(path) / cmd) if path and (Path(path) / cmd).is_file() else None,
+            )
+        mixed = os.pathsep.join([str(wsl_npm_dir), str(wsl_linux_dir)])
+        assert paths.which_native("codebuddy", path=mixed) == str(native_bin)
+

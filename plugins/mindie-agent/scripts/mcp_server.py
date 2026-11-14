@@ -41,6 +41,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import sys
+import sysconfig
 import time
 import uuid
 
@@ -294,22 +295,25 @@ def _resolve_component_command(component: str, *, config=None) -> list[str]:
         return configured
     python_exe = adapter.get("python") or sys.executable
     if component == "diagnostics":
-        return [python_exe, "-I", "-X", "utf8", "-m", "mindie_diagnostics.cli"]
-    if component == "npu_top":
-        exe = which_native("npu-top")
-        if exe:
-            return [exe]
-        return [python_exe, "-I", "-X", "utf8", "-m", "npu_top.cli"]
+        return [str(python_exe), "-I", "-X", "utf8", "-m", "mindie_diagnostics.cli"]
     module_map = {
         "profiler": "mindie_profiler",
         "sim": "mindie_sim",
         "coordinator": "mindie_coordinator.cli",
         "debugger": "mindie_debugger.cli",
+        "npu_top": "npu_top",
     }
-    exe = which_native("mindie-" + component)
+    bin_name = "npu-top" if component == "npu_top" else f"mindie-{component}"
+    runtime_dir = str(Path(python_exe).expanduser().parent)
+    search_path = os.pathsep.join([runtime_dir, sysconfig.get_path("scripts"), os.environ.get("PATH", "")])
+    exe = which_native(bin_name, path=search_path)
     if exe:
+        if os.name == "nt" and component in module_map and exe.lower().endswith(".exe"):
+            # Windows 11 Smart App Control (WinError 4551) blocks unsigned pip/uv
+            # console-script .exe trampolines; invoke via PSF-signed python.exe instead.
+            return [str(python_exe), "-I", "-X", "utf8", "-m", module_map[component]]
         return [exe]
-    return [python_exe, "-I", "-X", "utf8", "-m", module_map[component]]
+    return [str(python_exe), "-I", "-X", "utf8", "-m", module_map[component]]
 
 
 def _resolve_session(surface: str, tool_name: str, arguments: dict, *, config=None) -> tuple[str, str | None]:

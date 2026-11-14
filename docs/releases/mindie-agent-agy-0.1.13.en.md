@@ -1,0 +1,5 @@
+# mindie-agent-agy 0.1.13
+
+[中文](mindie-agent-agy-0.1.13.md)
+
+- **Windows 11 Smart App Control (`WinError 4551`) Component Dispatch & `npu_top` Module Entry Fix (`mcp_server.py`, `paths.py`, `bounded.py`, `component_update.py`, `tests/test_runtime_upgrade.py`)**: `_resolve_component_command` now searches the active runtime interpreter's `Scripts`/`bin` directory before `PATH`, dispatches Windows `.exe` console-script trampolines through PSF-signed `python -I -X utf8 -m <module>` to avoid Windows 11 Smart App Control (`WinError 4551`) blocks, and corrects the `npu_top` fallback module from `npu_top.cli` to `npu_top`; `paths.which_native` inspects WSL2 `PATH` entries per directory to reject LF npm `cmd-shim` wrappers, CRLF `#!` scripts, and PE binaries; `bounded.run` enforces live `max_output` streaming caps and `taskkill` exit validation; `component_update.py` adds cross-platform file locking around `component-update-status.json` and preserves `TimeoutError`; and `test_runtime_upgrade.py` supports Python 3.11 `shutil.rmtree` cleanup on read-only Git packfiles.
