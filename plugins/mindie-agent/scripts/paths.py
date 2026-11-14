@@ -25,9 +25,69 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
+import shutil
+import sys
 import tempfile
 
 MAX_CONFIG_BYTES = 65536
+_WSL_MOUNT_RE = re.compile(r"^/mnt/[a-zA-Z](?:/|$)")
+
+
+def _is_wsl() -> bool:
+    return sys.platform == "linux" and (
+        "WSL_DISTRO_NAME" in os.environ or Path("/proc/sys/fs/binfmt_misc/WSLInterop").exists()
+    )
+
+
+def _win32_tool_candidates(cmd: str) -> list[Path]:
+    base = cmd.lower().removesuffix(".exe")
+    home = Path.home()
+    local_app = Path(os.environ.get("LOCALAPPDATA") or (home / "AppData" / "Local"))
+    prog_files = Path(os.environ.get("ProgramFiles") or r"C:\Program Files")
+    out: list[Path] = []
+    if base == "uv":
+        out.extend([home / ".local" / "bin" / "uv.exe", local_app / "Microsoft" / "WinGet" / "Links" / "uv.exe"])
+        winget_pkgs = local_app / "Microsoft" / "WinGet" / "Packages"
+        if winget_pkgs.is_dir():
+            out.extend(sorted(winget_pkgs.glob("astral-sh.uv_*/uv.exe")))
+    elif base == "git":
+        out.extend([prog_files / "Git" / "cmd" / "git.exe", local_app / "Programs" / "Git" / "cmd" / "git.exe"])
+    elif base == "gh":
+        out.extend([prog_files / "GitHub CLI" / "gh.exe", local_app / "Programs" / "GitHub CLI" / "gh.exe"])
+    elif base == "gitleaks":
+        out.append(local_app / "Microsoft" / "WinGet" / "Links" / "gitleaks.exe")
+        winget_pkgs = local_app / "Microsoft" / "WinGet" / "Packages"
+        if winget_pkgs.is_dir():
+            out.extend(sorted(winget_pkgs.glob("Gitleaks.Gitleaks_*/gitleaks.exe")))
+    return out
+
+
+def which_native(cmd: str, path: str | None = None) -> str | None:
+    """Resolve `cmd` without picking Windows `/mnt/<drive>` shims on WSL2 or WindowsApps 0-byte stubs."""
+    search_path = os.environ.get("PATH", "") if path is None else path
+    if _is_wsl():
+        filtered = os.pathsep.join(
+            entry for entry in search_path.split(os.pathsep) if entry and not _WSL_MOUNT_RE.match(entry)
+        )
+        found = shutil.which(cmd, path=filtered)
+        if found and (found.lower().endswith(".exe") or _WSL_MOUNT_RE.match(found)):
+            return None
+        return found
+    found = shutil.which(cmd, path=search_path)
+    if os.name == "nt" and found:
+        try:
+            if "windowsapps" in found.replace("/", "\\").lower() and Path(found).stat().st_size == 0:
+                found = None
+        except TimeoutError:
+            raise
+        except OSError:
+            found = None
+    if os.name == "nt" and found is None and path is None:
+        for cand in _win32_tool_candidates(cmd):
+            if cand.is_file():
+                return str(cand)
+    return found
 
 
 def plugin_root() -> Path:
@@ -227,6 +287,8 @@ def atomic_write_json(path: str | Path, payload: dict) -> Path:
     except BaseException:
         try:
             tmp_path.unlink(missing_ok=True)
+        except TimeoutError:
+            raise
         except OSError:
             pass
         raise

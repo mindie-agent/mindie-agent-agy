@@ -1,0 +1,5 @@
+# mindie-agent-agy 0.1.12
+
+[中文](mindie-agent-agy-0.1.12.md)
+
+- **Windows 11 (CP936 / PowerShell 5.1 / Smart App Control) & WSL2 End-to-End Hardening and Tri-OS CI Gate (`paths.py`, `bounded.py`, `mindie_launch.py`, `knowledge_cli.py`, `organizer.py`)**: Adds `which_native` to reject WSL2 `/mnt/<drive>` Windows interop shims and 0-byte `WindowsApps` Store stubs while discovering WinGet `uv.exe` and user-scoped Git/GitHub CLI/Gitleaks; replaces the broken `pywin32` path with stdlib `ctypes` Win32 Job Objects (preserving `SessionStart` background updater survival on normal hook exit while terminating descendant trees on timeout); enforces `-I -X utf8`, `PYTHONUTF8=1`, and `CREATE_NO_WINDOW` across subprocesses; migrates `knowledge_cli.py` and `bridge.py` to cross-platform `--session` / `--input-file` arguments; fixes UNC `file://` URI decoding, case-folded path comparisons, and pre-send vs post-send HTTPS transport error classification, and wires `ubuntu-latest`, `macos-latest`, and `windows-latest` into CI gates.

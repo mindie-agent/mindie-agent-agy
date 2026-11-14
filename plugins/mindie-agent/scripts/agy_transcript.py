@@ -57,6 +57,16 @@ STRIP_TAGS_RE = re.compile(
 GESTURE_PREFIX_RE = re.compile(r"^\s*(?:/mindie-agent|\$mindie-agent(?::mindie-agent)?)(?:\s+|$)")
 
 
+def _canonical_path(path: str | Path) -> str:
+    try:
+        resolved = str(Path(path).resolve())
+    except TimeoutError:
+        raise
+    except OSError:
+        resolved = str(Path(path))
+    return resolved.removeprefix("\\\\?\\") if os.name == "nt" else resolved
+
+
 @dataclass(frozen=True)
 class FileIdentity:
     path: str
@@ -97,7 +107,7 @@ class FileIdentity:
             ):
                 return None
             return FileIdentity(
-                path,
+                _canonical_path(path),
                 int(data["dev"]),
                 int(data["ino"]),
                 0,
@@ -126,7 +136,7 @@ def identify(path: str | Path) -> FileIdentity | None:
     finally:
         os.close(fd)
     return FileIdentity(
-        str(Path(path).resolve()),
+        _canonical_path(path),
         stat.st_dev,
         stat.st_ino,
         stat.st_size,
@@ -320,7 +330,7 @@ def read_material(
             stat = os.fstat(stream.fileno())
             anchor = stream.read(ANCHOR_BYTES)
             current = FileIdentity(
-                str(Path(path).resolve()),
+                _canonical_path(path),
                 stat.st_dev,
                 stat.st_ino,
                 stat.st_size,
@@ -333,7 +343,7 @@ def read_material(
             if expected is not None:
                 stream.seek(0)
                 if (
-                    expected.path != current.path
+                    os.path.normcase(expected.path) != os.path.normcase(current.path)
                     or expected.dev != stat.st_dev
                     or expected.ino != stat.st_ino
                     or not expected.anchor_len

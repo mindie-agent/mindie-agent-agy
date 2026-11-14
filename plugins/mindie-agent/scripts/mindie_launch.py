@@ -6,27 +6,18 @@ Dispatches Antigravity lifecycle hooks (`hook session-start`, `hook pre-invocati
 and setup commands (`setup ...`) under explicit timeout budgets.
 
 [Invariants]
-- Enforces `HOOK_TOTAL = 10.0s >= HOOK_EXEC_BUDGET (8.0s) + CLEANUP_GRACE (2.0s)`.
-  Direct-dispatch hooks (no interpreter re-exec) are still bounded by
-  `HOOK_EXEC_BUDGET`; over-budget work emits host JSON and exits 0.
-- Hook failures never emit `{}` with exit 0. `PreToolUse` bind errors deny the
-  call. Hook re-exec `TimeoutExpired` and `TimeoutError` emit host-readable
-  JSON and exit 0 (`PreToolUse` deny; other hooks `injectSteps.ephemeralMessage`);
-  exit 1 with empty stdout would fail-open. Other hook exceptions propagate.
-- If the configured profile interpreter differs from `sys.executable` on MCP
-  launch, re-executes into the configured interpreter so `mindie_knowledge`,
-  `remote_dev`, and `mindie_diagnostics` imports resolve deterministically.
+- Enforces `HOOK_TOTAL = 10.0s >= HOOK_EXEC_BUDGET (8.0s) + CLEANUP_GRACE (2.0s)`;
+  over-budget hooks emit host JSON (`PreToolUse` deny; others `injectSteps`) and exit 0.
+- Never emits `{}` with exit 0 on hook failure, and re-execs into the configured
+  profile interpreter on MCP/hook launch so runtime imports resolve deterministically.
 
 [Timeouts & Locks]
 - `HOOK_EXEC_BUDGET = 8.0s`, `HOOK_CLEANUP_GRACE = 2.0s`, `HOOK_TOTAL = 10.0s`,
-  `HOOK_LOCK_BUDGET = 2.0s`, `HOOK_UV_STARTUP = 5.0s`.
-- Hook re-exec uses `timeout=HOOK_EXEC_BUDGET` (not `HOOK_TOTAL`) so cleanup
-  can emit JSON; setup outer re-exec covers sequential prep + nested re-exec
-  (`inner + (inner + CLEANUP_GRACE) + CLEANUP_GRACE`); update stays
-  `inner + 2 * CLEANUP_GRACE`. MCP stdio has no timeout. Timed re-exec kills
-  the process tree (POSIX group / Windows Job) then emits JSON so
-  grandchildren are not left as zombies.
-- Outer `hooks.json` timeout is `HOOK_OUTER_SECONDS = HOOK_TOTAL + HOOK_UV_STARTUP`.
+  `HOOK_LOCK_BUDGET = 2.0s`, `HOOK_UV_STARTUP = 5.0s`, `HOOK_OUTER_SECONDS = 15`.
+- Hook re-exec uses `timeout=HOOK_EXEC_BUDGET`; setup outer covers sequential prep +
+  nested re-exec (`inner + (inner + CLEANUP_GRACE) + CLEANUP_GRACE`); update uses
+  `inner + 2 * CLEANUP_GRACE`; MCP stdio is unbounded. Timed re-exec kills the
+  process tree (POSIX group / Windows Job) before emitting JSON.
 
 [Side-Effect Policy]
 - Delegates hook and MCP execution to `bridge.py`, `mcp_server.py`, and `setup.py`.
@@ -62,11 +53,13 @@ def _norm_python_path(py_exe: str | Path) -> Path:
 
 
 def _is_venv_python(py: str) -> bool:
+    if not isinstance(py, str):
+        return False
+    norm = py.replace("\\", "/")
     return bool(
-        isinstance(py, str)
-        and ("venv" in py or ".venv" in py)
-        and "/uv/python/" not in py
-        and "/Cellar/python" not in py
+        ("venv" in norm or ".venv" in norm)
+        and "/uv/python/" not in norm
+        and "/Cellar/python" not in norm
         and Path(py).is_file()
     )
 
@@ -197,10 +190,10 @@ def _emit_reexec_timeout(argv: list[str], exc: BaseException) -> int:
 
 
 def _reexec(target_py: str, target_script: Path, argv: list[str], env: dict) -> int:
-    from bounded import _attach_windows_job, _kill_process_tree
+    from bounded import _attach_windows_job, _close_windows_job, _kill_process_tree
 
     timeout = _timeout_role_budget(argv[0], argv)
-    cmd = [target_py, "-I", str(target_script), *argv]
+    cmd = [target_py, "-I", "-X", "utf8", str(target_script), *argv]
     popen_kwargs: dict = {"env": env}
     if os.name == "nt":
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -216,12 +209,16 @@ def _reexec(target_py: str, target_script: Path, argv: list[str], env: dict) -> 
         if timeout is None:
             return int(subprocess.run(cmd, **popen_kwargs).returncode)
         proc = subprocess.Popen(cmd, **popen_kwargs)
-        job = _attach_windows_job(proc)
+        job = _attach_windows_job(proc, kill_on_close=(argv[0] != "hook"))
         try:
             return int(proc.wait(timeout=timeout))
         except (subprocess.TimeoutExpired, TimeoutError) as exc:
             _kill_process_tree(proc, job, wait_timeout=min(0.5, HOOK_CLEANUP_GRACE))
+            job = None
             return _emit_reexec_timeout(argv, exc)
+        finally:
+            if job is not None:
+                _close_windows_job(job)
     except (subprocess.TimeoutExpired, TimeoutError) as exc:
         return _emit_reexec_timeout(argv, exc)
 
@@ -268,6 +265,7 @@ def main(argv: list[str] | None = None) -> int:
             env = dict(os.environ)
             env["_MINDIE_AGY_REEXEC"] = "1"
             env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONUTF8"] = "1"
             if argv[0] in {"hook", "mcp"}:
                 env["AGY_PLUGIN_ROOT"] = str(target_script.parent.parent)
             if argv[0] == "hook":
@@ -287,6 +285,7 @@ def main(argv: list[str] | None = None) -> int:
             env["_MINDIE_AGY_HOOK_BUDGETED"] = "1"
             env["_MINDIE_AGY_REEXEC"] = "1"
             env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONUTF8"] = "1"
             return _reexec(sys.executable, Path(__file__).resolve(), argv, env)
         if os.name != "nt" and not budgeted:
             return _run_hook_with_exec_budget(argv, rest)

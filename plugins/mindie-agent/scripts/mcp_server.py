@@ -52,7 +52,7 @@ from admission import status_facts
 from bounded import run as bounded_run
 from component_update import trigger_background_update_if_due
 from identity import claim_bind, finish_bind, require_session
-from paths import bind_db_path, config_path, diagnostics_config_path, read_json, remote_receipts_path
+from paths import bind_db_path, config_path, diagnostics_config_path, read_json, remote_receipts_path, which_native
 
 REMOTE_GRACE_SECONDS = 60.0
 REMOTE_MIN_BUDGET_SECONDS = 180.0
@@ -296,7 +296,7 @@ def _resolve_component_command(component: str, *, config=None) -> list[str]:
     if component == "diagnostics":
         return [python_exe, "-I", "-X", "utf8", "-m", "mindie_diagnostics.cli"]
     if component == "npu_top":
-        exe = shutil.which("npu-top")
+        exe = which_native("npu-top")
         if exe:
             return [exe]
         return [python_exe, "-I", "-X", "utf8", "-m", "npu_top.cli"]
@@ -306,7 +306,7 @@ def _resolve_component_command(component: str, *, config=None) -> list[str]:
         "coordinator": "mindie_coordinator.cli",
         "debugger": "mindie_debugger.cli",
     }
-    exe = shutil.which("mindie-" + component)
+    exe = which_native("mindie-" + component)
     if exe:
         return [exe]
     return [python_exe, "-I", "-X", "utf8", "-m", module_map[component]]
