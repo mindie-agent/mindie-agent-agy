@@ -192,7 +192,7 @@ def trigger_background_update_if_due(*, config: str | Path | None = None) -> boo
         else:
             kwargs["start_new_session"] = True
         proc = subprocess.Popen(
-            [str(py_exe), "-I", str(Path(__file__).resolve()), "--config", str(cfg_file)],
+            [str(py_exe), "-I", "-X", "utf8", str(Path(__file__).resolve()), "--config", str(cfg_file)],
             **kwargs,
         )
     except TimeoutError as exc:
@@ -247,7 +247,7 @@ def compatible_runtime(python: str, *, source=None, config=None, timeout: float 
         budget = min(15.0, deadline - time.monotonic())
         if budget <= 0:
             raise TimeoutError("runtime compatibility probe exceeded its budget")
-        return bounded_run([str(interpreter), "-I", "-c", imports], "", timeout=budget).returncode == 0
+        return bounded_run([str(interpreter), "-I", "-X", "utf8", "-c", imports], "", timeout=budget).returncode == 0
 
     if probe(python):
         return _norm_python_path(python)
@@ -256,7 +256,7 @@ def compatible_runtime(python: str, *, source=None, config=None, timeout: float 
         raise TimeoutError("runtime preparation has no remaining build budget")
     # The configured interpreter may be older than this plugin. Its existing
     # component builder prepares the new baseline in a separate generation.
-    command = [str(python), "-I", str(Path(__file__).resolve()), "--prepare-only",
+    command = [str(python), "-I", "-X", "utf8", str(Path(__file__).resolve()), "--prepare-only",
                "--python", str(python), "--source", str(source or repo_root(config)),
                "--config", str(config_path(config)), "--timeout", str(remaining - 20.0)]
     result = bounded_run(command, "", timeout=remaining - 15.0,
@@ -353,7 +353,8 @@ def check(
     adapter = read_json(cfg_file)
     eng_file = engine_config_path(cfg_file)
     cfg_py = adapter.get("python")
-    if not (isinstance(cfg_py, str) and ("venv" in cfg_py or ".venv" in cfg_py) and "/uv/python/" not in cfg_py):
+    cfg_py_norm = cfg_py.replace("\\", "/") if isinstance(cfg_py, str) else ""
+    if not (cfg_py_norm and ("venv" in cfg_py_norm or ".venv" in cfg_py_norm) and "/uv/python/" not in cfg_py_norm):
         cfg_py = None
     current_python = cfg_py or sys.executable
 
@@ -407,7 +408,7 @@ def check(
         try:
             if eng_file.is_file():
                 eng_payload = read_json(eng_file)
-                eng_payload["summary_command"] = [new_python, "-I", str(HERE / "organizer.py")]
+                eng_payload["summary_command"] = [new_python, "-I", "-X", "utf8", str(HERE / "organizer.py")]
                 atomic_write_json(eng_file, eng_payload)
         except (TimeoutError, OSError, ValueError, TypeError) as exc:
             post_promote_warn = f"{type(exc).__name__}: {exc}"

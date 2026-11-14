@@ -15,17 +15,15 @@ Use this skill **only** after the user explicitly invokes `/mindie-agent` or `$m
 
 1. **Manual Session Activation**:
    - The native Antigravity `PreInvocation` hook detects `/mindie-agent` in `lastUserInput` and activates the session lease (`entry_enabled = 1`) in `admission.sqlite3` for `conversationId`, injecting the bound `AGY_CONVERSATION_ID` and `knowledge_cli.py` path into context.
-   - If the `PreInvocation` hook was not yet run or you need to verify the session lease, run:
+   - If the `PreInvocation` hook was not yet run or you need to verify the session lease, run (works across PowerShell 5.1, `cmd.exe`, and bash/zsh):
      ```bash
-     AGY_CONVERSATION_ID="<conversation-id>" python -I "<plugin_root>/scripts/knowledge_cli.py" describe
+     python -I -X utf8 "<plugin_root>/scripts/knowledge_cli.py" --session "<conversation-id>" describe
      ```
 2. **Private Knowledge Catalog (`knowledge_cli.py`)**:
    - Knowledge tools (`knowledge_query`, `knowledge_explain`, `knowledge_feedback`, `knowledge_distill`, `knowledge_sync`) are intentionally absent from default MCP discovery (`mcp_config.json`).
-   - Execute any knowledge operation via `knowledge_cli.py` with JSON arguments on `stdin`:
+   - Execute any knowledge operation via `knowledge_cli.py` passing `--session "<conversation-id>"` and `--input-file <json_path>` (or UTF-8 JSON on `stdin`):
      ```bash
-     AGY_CONVERSATION_ID="<conversation-id>" python -I "<plugin_root>/scripts/knowledge_cli.py" knowledge_query <<'EOF'
-     {"query": "Ascend A3 ACLGraph capture", "conditions": {"chip": "A3"}}
-     EOF
+     python -I -X utf8 "<plugin_root>/scripts/knowledge_cli.py" --session "<conversation-id>" knowledge_query --input-file "<scratch_dir>/query.json"
      ```
    - Preserve the returned `isError` and nonzero exit status; never fabricate a session ID.
 3. **Always-On Deterministic MCP Tools (`mindie-remote-dev` & `mindie-tools`)**:

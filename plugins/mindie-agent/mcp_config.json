@@ -9,6 +9,8 @@
         "3.13",
         "python",
         "-B",
+        "-X",
+        "utf8",
         "-c",
         "import os,runpy,sys;from pathlib import Path;c=Path(os.environ.get('MINDIE_AGENT_CONFIG',str(Path.home()/'.config/mindie-agent/agy.json'))).expanduser();r=Path(os.environ.get('AGY_PLUGIN_ROOT','.')).resolve();p=r/'scripts'/'mindie_launch.py';sys.path.insert(0,str(p.parent));sys.argv=[str(p),'mcp','remote'];runpy.run_path(str(p),run_name='__main__')"
       ],
@@ -31,6 +33,8 @@
         "3.13",
         "python",
         "-B",
+        "-X",
+        "utf8",
         "-c",
         "import os,runpy,sys;from pathlib import Path;c=Path(os.environ.get('MINDIE_AGENT_CONFIG',str(Path.home()/'.config/mindie-agent/agy.json'))).expanduser();r=Path(os.environ.get('AGY_PLUGIN_ROOT','.')).resolve();p=r/'scripts'/'mindie_launch.py';sys.path.insert(0,str(p.parent));sys.argv=[str(p),'mcp','tools'];runpy.run_path(str(p),run_name='__main__')"
       ],

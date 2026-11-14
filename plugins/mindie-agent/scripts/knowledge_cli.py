@@ -29,10 +29,15 @@ knowledge operations (`knowledge_query`, `knowledge_explain`, `knowledge_feedbac
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
 import sys
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 from admission import gate, knowledge_lease
 from identity import require_session
@@ -311,23 +316,38 @@ def _format_failure(exc: Exception) -> dict:
     )
 
 
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--session", default=None)
+    parser.add_argument("--config", default=None)
+    parser.add_argument("--input-file", default=None)
+    parser.add_argument("ops", nargs="*")
+    return parser
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
-        if len(argv) != 1:
+        args, unknown = _build_parser().parse_known_args(argv)
+        if unknown or len(args.ops) != 1:
             raise ValueError("exactly one knowledge operation or 'describe' is required")
-        op = argv[0]
+        op = args.ops[0]
         arguments: dict = {}
         if op != "describe":
-            raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
+            if args.input_file is not None:
+                in_path = Path(args.input_file)
+                with in_path.open("rb") as stream:
+                    raw = stream.read(MAX_INPUT_BYTES + 1)
+            else:
+                raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
             if len(raw) > MAX_INPUT_BYTES:
                 raise ValueError("knowledge arguments exceed 1 MiB byte budget")
             if raw.strip():
-                parsed = json.loads(raw.decode("utf-8"))
+                parsed = json.loads(raw.decode("utf-8-sig"))
                 if not isinstance(parsed, dict):
                     raise ValueError("knowledge arguments must be a JSON object")
                 arguments = parsed
-        result = invoke(op, arguments)
+        result = invoke(op, arguments, session=args.session, config=args.config)
     except Exception as exc:
         result = _format_failure(exc)
     sys.stdout.buffer.write((json.dumps(result, ensure_ascii=False) + "\n").encode("utf-8"))

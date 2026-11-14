@@ -104,9 +104,16 @@ def test_admission_failure_does_not_terminate_stdio_server(tmp_path, monkeypatch
     # WorkBuddy rejects the missing one-shot bind before touching receipts.
     if surface == "remote":
         monkeypatch.setenv("AGY_CONVERSATION_ID", "454c6ee9-afea-47be-8188-abb9c7fb1f26")
-    completed = subprocess.run([sys.executable, str(script), surface],
-                               input="".join(json.dumps(item) + "\n" for item in requests),
-                               text=True, capture_output=True, timeout=15, env=dict(os.environ))
+    completed = subprocess.run(
+        [sys.executable, "-X", "utf8", str(script), surface],
+        input="".join(json.dumps(item) + "\n" for item in requests),
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        timeout=15,
+        env=dict(os.environ),
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+    )
     assert completed.returncode == 0, completed.stderr
     replies = {item["id"]: item for item in map(json.loads, completed.stdout.splitlines())}
     assert set(replies) == {1, 2, 3, 4}
