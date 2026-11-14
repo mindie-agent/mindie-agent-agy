@@ -181,3 +181,86 @@ def test_file_url_to_path_and_transcript_identity_canonicalization(tmp_path: Pat
     mat = agy_transcript.read_material(tfile, 0, session_id=SESSION_ID, expected=unser)
     assert mat["status"] == "ok"
     assert "hello ascend" in mat["text"]
+
+
+def test_powershell_activation_syntax_bom_input_proxy_tunnel_and_cleanup_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from types import SimpleNamespace
+    import subprocess
+    import knowledge_cli
+
+    # 1. PowerShell `& "C:\...\python.exe"` call operator when python path is quoted.
+    ws = tmp_path / "ws_ps"
+    ws.mkdir()
+    fake_py = tmp_path / "Python 313" / "python.exe"
+    fake_py.parent.mkdir(parents=True)
+    fake_py.write_bytes(b"MZ")
+    cfg = tmp_path / "agy.json"
+    cfg.write_text(json.dumps({"python": str(fake_py)}), encoding="utf-8")
+    out = bridge.handle_pre_invocation(
+        {
+            "conversationId": SESSION_ID,
+            "workspacePaths": [str(ws)],
+            "lastUserInput": "/mindie-agent verify ps syntax",
+            "invocationNum": 2,
+        },
+        config=cfg,
+    )
+    msg = out["injectSteps"][0]["ephemeralMessage"]
+    assert f'& "{fake_py}" -I -X utf8' in msg
+
+    # 2. PowerShell 5.1 UTF-8 BOM (`\xef\xbb\xbf`) accepted by `--input-file`.
+    bom_file = tmp_path / "ps51_bom.json"
+    bom_file.write_bytes(b"\xef\xbb\xbf" + json.dumps({"query": "ascend aclgraph"}).encode("utf-8"))
+    seen_ops: list[tuple[str, dict]] = []
+
+    def fake_invoke(op, arguments, **_kwargs):
+        seen_ops.append((op, arguments))
+        return {"isError": False, "ok": True}
+
+    monkeypatch.setattr(knowledge_cli, "invoke", fake_invoke)
+    rc = knowledge_cli.main(["--session", SESSION_ID, "--input-file", str(bom_file), "knowledge_query"])
+    assert rc == 0
+    assert seen_ops == [("knowledge_query", {"query": "ascend aclgraph"})]
+
+    # 3. HTTPS proxy `CONNECT` tunnel negotiation does NOT mark `transmitted = True`.
+    owner = SimpleNamespace(transmitted=False)
+    conn = organizer._TrackedHTTPSConnection("api.example.invalid", 443, owner=owner)
+    sent_chunks: list[bytes] = []
+    monkeypatch.setattr(organizer.http.client.HTTPSConnection, "send", lambda self, data: sent_chunks.append(data))
+    monkeypatch.setattr(
+        organizer.http.client.HTTPSConnection,
+        "_tunnel",
+        lambda self: self.send(b"CONNECT api.example.invalid:443 HTTP/1.0\r\n\r\n"),
+    )
+    conn._tunnel()
+    assert owner.transmitted is False
+    conn.send(b"POST /v1/chat/completions HTTP/1.1\r\n\r\n")
+    assert owner.transmitted is True
+
+    # 4. Shared Windows fallback cleanup budget never exceeds `wait_timeout` (2.0s).
+    waits: list[float] = []
+
+    class HungPopen:
+        def __init__(self, args=None, **_kwargs):
+            self.args = args or ["owned-child"]
+            self.pid = 4321
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            waits.append(float(timeout or 0.0))
+            raise subprocess.TimeoutExpired(self.args, timeout or 0.0)
+
+    monkeypatch.setattr(bounded, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(bounded, "_STDLIB_POPEN", HungPopen)
+    failed = bounded._kill_process_tree(HungPopen(), job_handle=None, wait_timeout=2.0)
+    assert failed is True
+    assert sum(waits) <= 2.0 + 1e-6
+

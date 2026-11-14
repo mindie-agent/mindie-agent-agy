@@ -343,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
             if len(raw) > MAX_INPUT_BYTES:
                 raise ValueError("knowledge arguments exceed 1 MiB byte budget")
             if raw.strip():
-                parsed = json.loads(raw.decode("utf-8"))
+                parsed = json.loads(raw.decode("utf-8-sig"))
                 if not isinstance(parsed, dict):
                     raise ValueError("knowledge arguments must be a JSON object")
                 arguments = parsed

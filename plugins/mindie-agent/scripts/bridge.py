@@ -176,13 +176,23 @@ def handle_pre_invocation(event: dict | None = None, *, config=None) -> dict:
                 py_exe = f'"{cfg_py}"'
         except ValueError:
             pass
+    ps_prefix = "& " if py_exe.startswith('"') else ""
+    shell_hint = (
+        f"PowerShell (`{ps_prefix}{py_exe} -I -X utf8 \"{knowledge_cli}\" --session \"{session}\" describe` / "
+        f"`{ps_prefix}{py_exe} -I -X utf8 \"{knowledge_cli}\" --session \"{session}\" <tool_name> --input-file <json_file>`) "
+        f"or cmd.exe / POSIX shells (`{py_exe} -I -X utf8 \"{knowledge_cli}\" --session \"{session}\" describe`)"
+        if ps_prefix
+        else (
+            f"`{py_exe} -I -X utf8 \"{knowledge_cli}\" --session \"{session}\" describe` / "
+            f"`{py_exe} -I -X utf8 \"{knowledge_cli}\" --session \"{session}\" <tool_name> --input-file <json_file>` "
+            "(PowerShell, cmd.exe, and POSIX shells)"
+        )
+    )
     msg = (
         f"The user explicitly enabled MindIE Agent for conversation `{session}` "
         f"(project_root=`{lease_info['project_root']}`, status=`{lease_info['status']}`). "
         f"Read the MindIE Agent skill instructions at `{skill_path}` and invoke private knowledge tools "
-        f"via `{py_exe} -I -X utf8 \"{knowledge_cli}\" --session \"{session}\" describe` / "
-        f"`{py_exe} -I -X utf8 \"{knowledge_cli}\" --session \"{session}\" <tool_name> --input-file <json_file>` "
-        f"(cross-platform in PowerShell, cmd.exe, and POSIX shells).{readiness_warning}"
+        f"via {shell_hint}.{readiness_warning}"
     )
     return {"injectSteps": [{"ephemeralMessage": msg}]}
 

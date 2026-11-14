@@ -166,6 +166,8 @@ def _attach_windows_job(proc, *, kill_on_close: bool = True):
 def _kill_process_tree(proc: subprocess.Popen, job_handle=None, *, wait_timeout: float = 2.0) -> bool:
     cleanup_failed = False
     killed_via_job = False
+    remaining_budget = max(0.05, float(wait_timeout))
+    deadline = time.monotonic() + remaining_budget
     if job_handle is not None and os.name == "nt":
         try:
             k32 = _win32_kernel32()
@@ -180,6 +182,7 @@ def _kill_process_tree(proc: subprocess.Popen, job_handle=None, *, wait_timeout:
         if os.name == "nt":
             if not killed_via_job and isinstance(proc, _STDLIB_POPEN):
                 tk_proc = None
+                tk_budget = min(remaining_budget * 0.7, max(0.0, deadline - time.monotonic()))
                 try:
                     tk_proc = _STDLIB_POPEN(
                         ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
@@ -188,15 +191,18 @@ def _kill_process_tree(proc: subprocess.Popen, job_handle=None, *, wait_timeout:
                         stderr=subprocess.DEVNULL,
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                     )
-                    tk_proc.wait(timeout=max(0.5, wait_timeout))
+                    tk_proc.wait(timeout=tk_budget)
                 except (subprocess.TimeoutExpired, TimeoutError):
                     cleanup_failed = True
+                    remaining_budget = max(0.0, remaining_budget - tk_budget)
                     if tk_proc is not None:
+                        kill_budget = min(0.2, remaining_budget, max(0.0, deadline - time.monotonic()))
                         try:
                             tk_proc.kill()
-                            tk_proc.wait(timeout=0.5)
+                            if kill_budget > 0:
+                                tk_proc.wait(timeout=kill_budget)
                         except (subprocess.TimeoutExpired, OSError):
-                            pass
+                            remaining_budget = max(0.0, remaining_budget - kill_budget)
                 except OSError:
                     cleanup_failed = True
             if proc.poll() is None:
@@ -224,7 +230,7 @@ def _kill_process_tree(proc: subprocess.Popen, job_handle=None, *, wait_timeout:
             except OSError:
                 pass
     try:
-        proc.wait(timeout=wait_timeout)
+        proc.wait(timeout=min(remaining_budget, max(0.0, deadline - time.monotonic())))
     except (subprocess.TimeoutExpired, TimeoutError):
         cleanup_failed = True
     else:

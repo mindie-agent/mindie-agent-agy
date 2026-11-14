@@ -133,10 +133,18 @@ class _TrackedHTTPSConnection(http.client.HTTPSConnection):
     def __init__(self, *args, owner=None, **kwargs):
         super().__init__(*args, **kwargs)
         self._owner = owner
+        self._in_tunnel = False
+
+    def _tunnel(self):
+        self._in_tunnel = True
+        try:
+            return super()._tunnel()
+        finally:
+            self._in_tunnel = False
 
     def send(self, data):
         super().send(data)
-        if self._owner is not None:
+        if self._owner is not None and not self._in_tunnel:
             self._owner.transmitted = True
 
 
