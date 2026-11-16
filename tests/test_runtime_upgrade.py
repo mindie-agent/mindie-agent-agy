@@ -10,7 +10,6 @@ import stat
 import subprocess
 import sys
 import tarfile
-import tempfile
 import time
 
 import anyio
@@ -40,7 +39,8 @@ OLD_TARGETS = {
 def test_old_runtime_pair_survives_prepare_failure_and_upgrades(tmp_path, monkeypatch, request):
     budget_seconds = 240.0 if os.name == "nt" else 120.0
     deadline = time.monotonic() + budget_seconds
-    tmp_path = Path(tempfile.mkdtemp(prefix="mindie-upgrade-", dir=ROOT.parent))
+    # Use pytest's isolated tmp_path. Never create a sibling under ROOT.parent:
+    # that pollutes the developer's checkout parent with mindie-upgrade-* dirs.
 
     def _force_writable(_func, target_path, _exc):
         try:
@@ -53,7 +53,10 @@ def test_old_runtime_pair_survives_prepare_failure_and_upgrades(tmp_path, monkey
 
     def clean_native_directory():
         resolved = tmp_path.resolve()
-        assert resolved.parent == ROOT.parent.resolve() and resolved.name.startswith("mindie-upgrade-")
+        assert resolved != ROOT.resolve()
+        assert not resolved.is_relative_to(ROOT.parent.resolve())
+        if not resolved.exists():
+            return
         # Component generations contain long third-party package paths and read-only git packfiles on Windows.
         raw = str(resolved)
         rm_target = (raw if raw.startswith("\\\\?\\") else f"\\\\?\\{raw}") if os.name == "nt" else resolved
@@ -65,7 +68,7 @@ def test_old_runtime_pair_survives_prepare_failure_and_upgrades(tmp_path, monkey
     request.addfinalizer(clean_native_directory)
     home, config_home, data_home = (tmp_path / name for name in ("home", "config", "data"))
     for path in (home, config_home, data_home):
-        path.mkdir()
+        path.mkdir(parents=True, exist_ok=True)
     for name, value in {
         "HOME": home, "USERPROFILE": home, "MINDIE_CONFIG_HOME": config_home,
         "MINDIE_DATA_HOME": data_home, "MINDIE_AGENT_CONFIG": config_home / f"{HOST.lower()}.json",
@@ -133,8 +136,9 @@ def test_old_runtime_pair_survives_prepare_failure_and_upgrades(tmp_path, monkey
     legacy.mkdir()
     with tarfile.open(fileobj=io.BytesIO(archive)) as packed:
         packed.extractall(legacy, filter="data")
-    # A real global native directory is outside the OS temp tree: the old
-    # installer deliberately used different script bindings for temp installs.
+    # The native directory stays under the isolated pytest temp tree, so the
+    # v0.1.6 installer intentionally binds the staged payload scripts; the
+    # upgrade assertions below accept that temp-install branch.
     native = home / ".gemini/config/plugins/mindie-agent"
     shutil.copytree(legacy / "plugins/mindie-agent", native)
     monkeypatch.setenv("HOME", str(home))
@@ -147,7 +151,13 @@ def test_old_runtime_pair_survives_prepare_failure_and_upgrades(tmp_path, monkey
     old_profile["user_setting"] = "preserve"
     config.write_text(json.dumps(old_profile), encoding="utf-8")
     if IS_AGY:
-        assert Path(old_profile["runtime_scripts"]).resolve() == scripts.resolve()
+        # pytest's tmp_path is inside the OS temp tree, where the v0.1.6
+        # installer deliberately rebinds runtime_scripts to the staged payload
+        # instead of the native directory. The native directory is still the
+        # source that was staged and verified.
+        staged_scripts = Path(old_profile["source_root"]) / "plugins/mindie-agent/scripts"
+        assert Path(old_profile["runtime_scripts"]).resolve() == staged_scripts.resolve()
+        assert (staged_scripts / "mindie_launch.py").is_file()
     retained_scripts = Path(old_profile["source_root"]) / "plugins/mindie-agent/scripts"
     before = config.read_bytes()
     previous_payload = (retained_scripts / "mcp_server.py").read_bytes()

@@ -1,35 +1,37 @@
 """Independent shared component runtime updater for the Antigravity (AGY) adapter.
 
 [Role]
-Discovers newer formal GitHub Releases of shared MindIE runtime components
-(`mindie-knowledge`, `remote-dev`, `mindie-diagnostics`, `mindie-debugger`,
-`mindie-profiler`, `mindie-sim`, `npu-top`, `mindie-coordinator`) and builds an isolated component
-generation under `state_dir()/component-runtimes` without requiring a new
-`mindie-agent-agy` plugin release.
+Discovers newer formal GitHub Releases of the shared MindIE runtime components
+and builds an isolated generation under `state_dir()/component-runtimes`
+without requiring a new `mindie-agent-agy` plugin release.
 
 [Invariants]
 - Monotonic Component Floor: `discover()` selects `max(installed, baseline, latest_formal_release)`
   and never downgrades an already-installed newer component.
-- Atomic Profile Rebinding: `agy.json` and `agy.engine.json` are updated via
-  `atomic_write_json` (`os.replace()`) only after the candidate generation passes
-  `runtime_inventory` lock and VCS receipt verification.
+- Atomic Profile Rebinding: `agy.json` / `agy.engine.json` are updated via
+  `atomic_write_json` (`os.replace()`) only after lock and VCS verification.
 - Background spawn writes `in_progress` with `pid` only after `Popen` returns;
-  a stored `in_progress` whose pid is not running (including an unreaped
-  zombie) is reaped and reclaimed instead of blocking the next check. Spawn
-  failure records `status="failed"` and raises. Status-write failure after
-  spawn kills the untracked child so a later check cannot start a duplicate.
-  `read_inventory` failure publishes `status="failed"` rather than `up_to_date`.
-- Never writes into `~/.gemini` and never activates a session lease.
+  an unreaped zombie pid is reclaimed instead of blocking the next check.
+  Spawn/status-write failure kills the untracked child; `read_inventory`
+  failure publishes `status="failed"` rather than `up_to_date`.
+- One cross-process update mutex (`<data_home>/agy-component-update.lock`)
+  serializes `check()`; contention returns `status="busy"` after a bounded wait.
+- After the atomic switch, a bounded best-effort cleanup retires superseded
+  generations and legacy baggage, keeping `status="updated"` + `cleanup_warning`
+  when deferred; never writes `~/.gemini` or activates a session lease.
 
 [Timeouts & Locks]
 - Enclosing budget defaults to `540.0s`: `15.0s` metadata read, `120.0s` release
   catalog discovery, `420.0s` `uv` runtime build with OS generation lock, and
   `5.0s` cleanup reserve (`outer_timeout >= sum(inner_budgets) + cleanup_grace`).
+- The update mutex waits at most `UPDATE_LOCK_WAIT_SECONDS` (2.0s); the
+  post-switch reclaim owns a separate `RETIREMENT_BUDGET_SECONDS` (5.0s).
 
 [Side-Effect Policy]
-- Writes candidate runtime generations under `state_dir()/component-runtimes`
-  and atomically updates `agy.json` / `agy.engine.json` when a newer component
-  release is activated.
+- Writes candidate runtime generations under `state_dir()/component-runtimes`,
+  atomically updates `agy.json` / `agy.engine.json` when a newer component
+  release is activated, and delegates bounded silent reclamation of superseded
+  generations to `mindie_knowledge.storage`.
 """
 
 from __future__ import annotations
@@ -57,6 +59,7 @@ from paths import (
     config_path,
     data_home,
     engine_config_path,
+    plugin_root,
     read_json,
     repo_root,
     state_dir,
@@ -64,6 +67,12 @@ from paths import (
 
 UPDATE_CHECK_INTERVAL = 300.0
 UPDATE_FAILURE_BACKOFF = 60.0
+UPDATE_LOCK_NAME = "agy-component-update.lock"
+UPDATE_LOCK_WAIT_SECONDS = 2.0
+
+
+class UpdateLockBusy(TimeoutError):
+    """Another process holds the cross-process component update mutex."""
 
 
 def _record_background_update_failure(status_file: Path, checked_at: float, exc: BaseException) -> None:
@@ -148,57 +157,90 @@ def _pid_running_windows(pid: int) -> bool:
         return False
 
 
+def _lock_descriptor(fd: int) -> None:
+    """Acquire one non-blocking exclusive lock on an existing descriptor."""
+    if _REAL_OS.name == "nt":
+        import msvcrt
+
+        if _REAL_OS.fstat(fd).st_size == 0:
+            _REAL_OS.write(fd, b"\0")
+        _REAL_OS.lseek(fd, 0, _REAL_OS.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except TimeoutError:
+            raise
+        except OSError as exc:
+            # msvcrt reports contention as a plain OSError, never BlockingIOError.
+            raise BlockingIOError(exc.errno or 13, "file lock is held") from None
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_descriptor(fd: int) -> None:
+    if _REAL_OS.name == "nt":
+        import msvcrt
+
+        _REAL_OS.lseek(fd, 0, _REAL_OS.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
 @contextlib.contextmanager
-def _status_file_lock(status_file: Path, *, timeout: float = 2.0):
-    """Synchronize `component-update-status.json` updates across parent and child."""
-    lock_path = status_file.with_suffix(".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = _REAL_OS.open(str(lock_path), _REAL_OS.O_CREAT | _REAL_OS.O_RDWR, 0o600)
+def _exclusive_file_lock(path: Path, *, timeout: float):
+    """One bounded OS-lock acquisition; contention raises `TimeoutError`."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = _REAL_OS.open(str(path), _REAL_OS.O_CREAT | _REAL_OS.O_RDWR, 0o600)
     locked = False
-    deadline = time.monotonic() + max(0.05, float(timeout))
+    deadline = time.monotonic() + max(0.0, float(timeout))
     try:
-        if _REAL_OS.name == "nt":
-            import msvcrt
-
-            if _REAL_OS.fstat(fd).st_size == 0:
-                _REAL_OS.write(fd, b"\0")
-            while True:
-                _REAL_OS.lseek(fd, 0, _REAL_OS.SEEK_SET)
-                try:
-                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                    locked = True
-                    break
-                except OSError as exc:
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError(f"timed out acquiring {lock_path.name}") from exc
-                    time.sleep(0.01)
-        else:
-            import fcntl
-
-            while True:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    locked = True
-                    break
-                except BlockingIOError as exc:
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError(f"timed out acquiring {lock_path.name}") from exc
-                    time.sleep(0.01)
-        yield
+        while True:
+            try:
+                _lock_descriptor(fd)
+                locked = True
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out acquiring {path.name}") from exc
+                time.sleep(0.01)
+        yield path
     finally:
         try:
             if locked:
-                if _REAL_OS.name == "nt":
-                    import msvcrt
-
-                    _REAL_OS.lseek(fd, 0, _REAL_OS.SEEK_SET)
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(fd, fcntl.LOCK_UN)
+                _unlock_descriptor(fd)
         finally:
             _REAL_OS.close(fd)
+
+
+@contextlib.contextmanager
+def _status_file_lock(status_file: Path, *, timeout: float = 2.0):
+    """Synchronize `component-update-status.json` updates across parent and child."""
+    with _exclusive_file_lock(status_file.with_suffix(".lock"), timeout=timeout) as held:
+        yield held
+
+
+@contextlib.contextmanager
+def update_lock(path: str | Path | None = None, *, timeout: float = UPDATE_LOCK_WAIT_SECONDS):
+    """Cross-process mutex serializing `check()` build/switch phases.
+
+    Non-blocking attempts with one bounded wait; contention raises
+    `UpdateLockBusy` (a `TimeoutError`) so the caller can report `busy`
+    instead of racing a second build or double-switching `agy.json`.
+    """
+    target = Path(path) if path is not None else data_home() / UPDATE_LOCK_NAME
+    holder = _exclusive_file_lock(target, timeout=timeout)
+    try:
+        holder.__enter__()
+    except TimeoutError as exc:
+        raise UpdateLockBusy(f"concurrent component update holds {target.name}") from exc
+    try:
+        yield target
+    finally:
+        holder.__exit__(None, None, None)
 
 
 def trigger_background_update_if_due(*, config: str | Path | None = None) -> bool:
@@ -408,8 +450,85 @@ def check(
     sync_feeds: bool = False,
     timeout: float = 540.0,
 ) -> dict:
-    """Check for newer formal component releases, switch profile interpreter, and optionally sync feeds."""
+    """Check for newer formal component releases under the cross-process update mutex."""
     apply_enterprise_transport_env()
+    try:
+        with update_lock():
+            return _check_locked(
+                config=config,
+                source=source,
+                force=force,
+                sync_feeds=sync_feeds,
+                timeout=timeout,
+            )
+    except UpdateLockBusy:
+        return _busy_result(config)
+
+
+def _busy_result(config: str | Path | None = None) -> dict:
+    """Honest `busy` receipt: a peer owns the switch, so nothing was changed."""
+    cfg_file = config_path(config)
+    current = sys.executable
+    try:
+        if cfg_file.is_file():
+            configured = read_json(cfg_file).get("python")
+            if isinstance(configured, str) and configured:
+                current = configured
+    except TimeoutError:
+        raise
+    except (OSError, ValueError):
+        pass
+    return dict(
+        schema="mindie-component-update/1",
+        harness="antigravity",
+        status="busy",
+        python=_norm_python_path(current),
+        installed={},
+        update_lock="held",
+    )
+
+
+def _checkout_forbidden_roots(adapter, *, config, source) -> list:
+    """External user checkouts that reclamation must treat as forbidden roots."""
+    roots = []
+    for value in (source, adapter.get("source_root"), adapter.get("runtime_scripts"),
+                  repo_root(config), plugin_root()):
+        if isinstance(value, (str, Path)) and str(value):
+            roots.append(Path(value))
+    return roots
+
+
+def _reclaim_after_switch(cfg_file, *, adapter, previous_python, active_python, source):
+    """Bounded silent GC after a verified switch; never raises into the update path."""
+    try:
+        from storage_lifecycle import cleanup_warning, reclaim_after_switch
+
+        report = reclaim_after_switch(
+            runtimes_root=state_dir(cfg_file) / "component-runtimes",
+            keep_python=(previous_python, active_python),
+            forbidden_roots=_checkout_forbidden_roots(
+                adapter, config=cfg_file, source=source),
+        )
+        return report, cleanup_warning(report)
+    except TimeoutError:
+        return ({"status": "partial", "prune": None, "sweep": None,
+                 "warnings": ["cleanup budget exhausted"]},
+                "post-update cleanup: budget exhausted")
+    except Exception as exc:  # noqa: BLE001 - post-switch GC must never fail the update
+        detail = "post-update cleanup unavailable: " + type(exc).__name__
+        return ({"status": "unavailable", "prune": None, "sweep": None,
+                 "warnings": [type(exc).__name__]}, detail)
+
+
+def _check_locked(
+    *,
+    config: str | Path | None = None,
+    source: str | Path | None = None,
+    force: bool = False,
+    sync_feeds: bool = False,
+    timeout: float = 540.0,
+) -> dict:
+    """Check, build, switch, and reclaim while the update mutex is held."""
     from mindie_knowledge.component_bindings import rebind_commands
     from mindie_knowledge.component_runtime import read_inventory
     from setup import ensure_default_profile
@@ -457,6 +576,8 @@ def check(
     inventory_error = None
     inventory_diag = None
     post_promote_warn = None
+    cleanup_report = None
+    cleanup_warn = None
     if artifact is not None:
         new_python = _norm_python_path(artifact["python"])
         installed = artifact["installed"]
@@ -479,6 +600,15 @@ def check(
                 atomic_write_json(eng_file, eng_payload)
         except (TimeoutError, OSError, ValueError, TypeError) as exc:
             post_promote_warn = f"{type(exc).__name__}: {exc}"
+        # Both atomic switches are durable: reclaim superseded generations under
+        # a separate bounded budget. A deferred GC is a warning, never a failure.
+        cleanup_report, cleanup_warn = _reclaim_after_switch(
+            cfg_file,
+            adapter=updated_adapter,
+            previous_python=_norm_python_path(current_python),
+            active_python=new_python,
+            source=source,
+        )
     else:
         status = "up_to_date"
         active_python = _norm_python_path(current_python)
@@ -522,6 +652,10 @@ def check(
     if post_promote_warn is not None:
         result["receipt_warning"] = post_promote_warn
         result["receipt_unconfirmed"] = True
+    if cleanup_report is not None:
+        result["cleanup"] = cleanup_report
+        if cleanup_warn is not None:
+            result["cleanup_warning"] = cleanup_warn
     if sync_feeds:
         try:
             if community_config_path(cfg_file).is_file() and eng_file.is_file():
@@ -548,6 +682,8 @@ def check(
         elif result.get("receipt_unconfirmed"):
             status_payload["receipt_warning"] = result.get("receipt_warning")
             status_payload["receipt_unconfirmed"] = True
+        if cleanup_warn is not None:
+            status_payload["cleanup_warning"] = cleanup_warn
         with _status_file_lock(status_file):
             atomic_write_json(status_file, status_payload)
     except (TimeoutError, OSError) as exc:

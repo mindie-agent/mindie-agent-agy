@@ -10,17 +10,25 @@ the persistent component virtualenv (`agy-venv`) and LF-normalized source baseli
 - Passive Default: `ensure_default_profile` and `configure_community` write
   MindIE-owned JSON configs atomically via `os.replace()` and never activate a
   session lease or start the background knowledge loop.
+- Reuse Profile Interpreter: a profile whose recorded `python` still provides
+  the runtime APIs performs the in-place component upgrade, so no redundant
+  baseline `agy-venv` is rebuilt; `agy-venv` is staged only when no usable
+  interpreter exists.
 - Never writes into `~/.gemini`.
 
 [Timeouts & Locks]
 - Local config validation/writes are immediate; first-time `uv sync` runtime
   bootstrap is bounded by `--timeout` (default `BOOTSTRAP_TIMEOUT = 540.0s`).
   Interpreter re-exec uses `timeout=timeout + BOOTSTRAP_CLEANUP_GRACE`.
+- A cold `agy-venv` build pins `UV_CACHE_DIR` to a same-volume cache
+  (`<data_home>/.uv-cache`) only when the caller left it unset and the default
+  cache would cross filesystems; an explicit `UV_CACHE_DIR` is preserved.
 
 [Side-Effect Policy]
 - Writes `agy.json`, `agy.engine.json`, `mindie-community.json`, and
   `mindie-consent.json` under `config_home()`, and stages `agy-source` /
-  `agy-venv` under `data_home()` when bootstrapping.
+  `agy-venv` (plus an optional same-volume `.uv-cache`) under `data_home()`
+  when bootstrapping.
 - `--help` / `-h` and `--dry-run` are read-only: they do not stage source,
   create `agy-venv`, import `mindie_knowledge`, or write config directories.
   Unique abbreviations that argparse accepts (`--dry`, `--dr`, and similar)
@@ -62,6 +70,7 @@ from paths import (
     which_native,
 )
 import setup_sharing
+from storage_lifecycle import configure_uv_cache
 
 BOOTSTRAP_TIMEOUT = 540.0
 BOOTSTRAP_CLEANUP_GRACE = 5.0
@@ -182,6 +191,33 @@ def _norm_python_path(py_exe: str | Path) -> Path:
     return p.parent.resolve() / p.name
 
 
+def _profile_python(config: str | Path | None) -> Path | None:
+    """The profile's already-activated interpreter, when it still exists on disk."""
+    cfg_file = config_path(config)
+    if not cfg_file.is_file():
+        return None
+    try:
+        configured = read_json(cfg_file).get("python")
+    except TimeoutError:
+        raise
+    except (OSError, ValueError):
+        return None
+    if not isinstance(configured, str) or not configured:
+        return None
+    candidate = _norm_python_path(configured)
+    return candidate if candidate.is_file() else None
+
+
+def _imports_runtime(python: Path, *, timeout: float) -> bool:
+    probe = bounded_run(
+        [str(python), "-I", "-X", "utf8", "-c",
+         "import mindie_knowledge, remote_dev, mindie_diagnostics"],
+        "",
+        timeout=min(15.0, max(0.1, float(timeout))),
+    )
+    return probe.returncode == 0
+
+
 def ensure_runtime_python(
     source_root: str | Path | None = None,
     python_exe: str | None = None,
@@ -207,6 +243,11 @@ def ensure_runtime_python(
         )
     ):
         return verified(_norm_python_path(sys.executable))
+    retained = _profile_python(config)
+    if retained is not None and _imports_runtime(retained, timeout=timeout):
+        # The active generation can perform the component upgrade in place; a
+        # second baseline agy-venv would only duplicate that runtime.
+        return verified(retained)
 
     venv_dir = data_home() / "agy-venv"
     venv_py = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -233,6 +274,7 @@ def ensure_runtime_python(
 
     env = apply_enterprise_transport_env(dict(os.environ))
     env["UV_PROJECT_ENVIRONMENT"] = str(venv_dir)
+    configure_uv_cache(venv_dir, env)
     proc = bounded_run(
         [
             uv,
