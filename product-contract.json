@@ -1,10 +1,10 @@
 {
   "schema": "mindie-product-contract/1",
   "harness": "antigravity",
-  "native_version": "0.1.13",
+  "native_version": "0.1.14",
   "python_Range": ">=3.11,<3.15",
   "components": {
-    "mindie-knowledge": "0.13.13",
+    "mindie-knowledge": "0.13.20",
     "remote-dev": "0.11.6",
     "mindie-diagnostics": "0.5.7",
     "mindie-coordinator": "0.7.5",
