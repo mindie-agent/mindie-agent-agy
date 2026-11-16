@@ -2,9 +2,7 @@
 
 [Role]
 Serves public MCP discovery (`tools/list`) and tool execution (`tools/call`) for
-`mindie-remote-dev` (`remote_*` tools + Antigravity aliases) and `mindie-tools`
-(`profiler`, `sim`, `coordinator`, `diagnostics_status`, `diagnostics_bundle`,
-and factual `mindie_status`).
+`mindie-remote-dev` and `mindie-tools` (profiler/sim/coordinator/diagnostics/npu_top).
 
 [Invariants]
 - Default MCP discovery (`tools/list`) NEVER exposes `knowledge_*` tool names,
@@ -12,23 +10,25 @@ and factual `mindie_status`).
 - Deterministic tools (`remote_*`, `profiler`, `sim`, `coordinator`,
   `diagnostics_*`, `mindie_status`) work in ordinary sessions without requiring
   a knowledge lease.
-- Receipt Honesty Invariant: once a remote or component operation succeeds, if
-  local SQLite receipt persistence (`RemoteReceipts.finish`) or `finish_bind`
-  raises an `OSError` or `sqlite3.Error`, `isError` stays `False` and
-  `receipt_warning` + `receipt_unconfirmed=True` are attached to
-  `structuredContent` so the caller never blindly repeats a completed mutation.
+- Receipt Honesty: once a remote/component operation succeeds, a local SQLite
+  `finish`/`finish_bind` `OSError` or `sqlite3.Error` keeps `isError=False` and
+  attaches `receipt_warning` + `receipt_unconfirmed=True` so the caller never
+  blindly repeats a completed mutation.
 - Non-empty UTF-8/JSON parse failures return JSON-RPC `-32700` Parse error.
   Parsed non-object frames return `-32600` Invalid Request (never dropped).
 - Background updater spawn failure never aborts `tools/call` or the stdio loop.
+- The resident stdio server holds a shared `acquire_runtime_lease` on the
+  managed generation owning `sys.executable`; a missing/read-only generation
+  degrades to no lease and never blocks startup.
 
 [Timeouts & Locks]
-- Uses SQLite WAL mode with `busy_timeout=5000` (`timeout=5.0`) for
-  `RemoteReceipts` (`remote-receipts.sqlite3`).
+- SQLite WAL mode with `busy_timeout=5000` (`timeout=5.0`) for `RemoteReceipts`
+  (`remote-receipts.sqlite3`); the generation lease is one non-blocking OS lock.
 - Enforces `remote_timeout(name, args) = max(minimum, inner_wait + 60.0s grace)`.
 
 [Side-Effect Policy]
-- `initialize` and `tools/list` read the selected release without knowledge
-  authorization or service admission.
+- `initialize`/`tools/list` are read-only; serving creates only the shared
+  generation lease files owned by `mindie_knowledge.storage`.
 """
 
 from __future__ import annotations
@@ -618,51 +618,61 @@ def serve(surface: str, *, config=None) -> int:
     if surface not in {"remote", "tools"}:
         raise ValueError(f"unsupported MCP surface: {surface}")
     receipts = RemoteReceipts(remote_receipts_path(config))
-    for raw_line in sys.stdin.buffer:
-        line = raw_line.strip()
-        if not line:
-            continue
-        try:
-            req = json.loads(line.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            print(
-                f"MindIE MCP parse error: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-            sys.stdout.buffer.write(
-                (
-                    json.dumps(
-                        {
-                            "jsonrpc": "2.0",
-                            "id": None,
-                            "error": {
-                                "code": -32700,
-                                "message": f"Parse error: {type(exc).__name__}: {exc}",
+    from storage_lifecycle import hold_runtime_lease
+
+    with hold_runtime_lease():
+        for raw_line in sys.stdin.buffer:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                req = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                print(
+                    f"MindIE MCP parse error: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                sys.stdout.buffer.write(
+                    (
+                        json.dumps(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": None,
+                                "error": {
+                                    "code": -32700,
+                                    "message": f"Parse error: {type(exc).__name__}: {exc}",
+                                },
                             },
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                ).encode("utf-8")
-            )
-            sys.stdout.buffer.flush()
-            continue
-        resp = handle_rpc(req, surface, config=config, receipts=receipts)
-        if resp is not None:
-            sys.stdout.buffer.write((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
-            sys.stdout.buffer.flush()
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    ).encode("utf-8")
+                )
+                sys.stdout.buffer.flush()
+                continue
+            resp = handle_rpc(req, surface, config=config, receipts=receipts)
+            if resp is not None:
+                sys.stdout.buffer.write((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+                sys.stdout.buffer.flush()
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     surface = argv[0] if argv else "tools"
+    from storage_lifecycle import hold_runtime_lease
+
     if "--once" not in argv:
         from remote_dev.mcp.catalog_refresh import profile_selection, serve_selected
-        return serve_selected(lambda: profile_selection(
-            config_path(), Path(__file__).resolve().parent, surface,
-            config_env="MINDIE_AGENT_CONFIG", plugin_env="AGY_PLUGIN_ROOT",
-        ))
+
+        # The resident front keeps its generation leased while it dispatches
+        # per-request helpers; otherwise a post-switch prune could retire the
+        # interpreter and payload it is still selecting from.
+        with hold_runtime_lease():
+            return serve_selected(lambda: profile_selection(
+                config_path(), Path(__file__).resolve().parent, surface,
+                config_env="MINDIE_AGENT_CONFIG", plugin_env="AGY_PLUGIN_ROOT",
+            ))
     return serve(surface)
 
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import sys
+
 import pytest
 
 
@@ -585,3 +587,50 @@ def test_hook_reexec_timeout_error_emits_host_readable_json_and_exit_0(monkeypat
     assert denied.get("decision") != "allow"
     assert "TimeoutError" in denied["reason"]
     assert "TimeoutExpired" not in denied["reason"]
+
+
+def test_child_update_failure_marker_preserves_stage_and_transport(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """#360 class: child `setup.py`/`uv` failures keep their structured class."""
+    import component_update
+    import setup
+    import update_failures
+
+    resolver = update_failures.UpdateFailure(
+        "release discovery failed", category="resolver", stage="discover")
+    marker = update_failures.marker_line(resolver)
+    assert update_failures.parse_markers("noise\n" + marker + "\n") == {
+        "category": "connectivity",
+        "stage": "discover",
+        "reason_code": "update_transport_unavailable",
+    }
+    assert update_failures.parse_markers("mindie-update-failure: {not json}") is None
+
+    class Child:
+        returncode = 1
+        stdout = ""
+        stderr = ("error: No solution found when resolving dependencies: "
+                  "conflicting dependencies\n" + marker + "\n")
+
+    monkeypatch.setattr(component_update, "bounded_run", lambda *a, **kw: Child())
+    with pytest.raises(update_failures.UpdateFailure) as caught:
+        component_update.compatible_runtime(sys.executable, source=REPO_ROOT, timeout=120.0)
+    assert caught.value.category == "connectivity"
+    assert caught.value.substage == "discover"
+    assert update_failures.classify_exception(caught.value)[1] is False
+
+    class FailedUv:
+        returncode = 1
+        stdout = ""
+        stderr = "error: failed to connect to github.com: connection timed out"
+
+    monkeypatch.setattr(setup.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(setup, "_profile_python", lambda config: None)
+    monkeypatch.setattr(setup, "stage_source_baseline", lambda *a, **k: REPO_ROOT)
+    monkeypatch.setattr(setup, "which_native", lambda name: "uv")
+    monkeypatch.setattr(setup, "bounded_run", lambda *a, **k: FailedUv())
+    with pytest.raises(update_failures.UpdateFailure) as uv_failure:
+        setup.ensure_runtime_python(config=tmp_path / "agy.json")
+    assert uv_failure.value.category == "connectivity"
+    assert uv_failure.value.substage == "uv-sync"
+    assert update_failures.classify_exception(uv_failure.value)[1] is False

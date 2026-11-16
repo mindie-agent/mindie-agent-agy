@@ -9,6 +9,8 @@ contribution-gated reporting status to `mindie_diagnostics.integration`.
 - Never includes prompts, transcripts, commands, paths, environment variables,
   or credentials in diagnostic records.
 - Respects saved consent authority in `mindie-consent.json` (`effective_reporting`).
+- `update` failures are classified locally first: `resolver`, `busy`, `deferred`,
+  and `prerequisite` stay `reportable=False` even on older diagnostics builds.
 
 [Timeouts & Locks]
 - Fault recording uses bounded local reads and append-only JSONL writes only.
@@ -72,6 +74,12 @@ _NON_REPORTABLE_MCP_EXC_NAMES = frozenset({
     "MachineDirectoryUnavailable",
     "HostQueueUnavailable",
     "CancelledError",
+    "UpdateFailure",
+    "LockTimeout",
+    "LockTimeoutError",
+    "FileLockTimeoutError",
+    "LockBusy",
+    "LockBusyError",
 })
 _TB_FILE_RE = re.compile(
     r'^\s*File "([^"]+)", line (\d+), in ([A-Za-z_][A-Za-z0-9_]{0,99}|<module>|<lambda>|<listcomp>|<dictcomp>|<setcomp>|<genexpr>)\s*$'
@@ -288,6 +296,26 @@ def _chain_inner_diagnostic(exc):
     return None
 
 
+def _update_policy(category: str, exception, reportable: bool, reason_code):
+    """Resolve an `update` failure before it reaches the diagnostics library.
+
+    Older installed `mindie_diagnostics` builds do not map `resolver` or
+    `busy`/`deferred`/`prerequisite`; resolving here keeps transport and local
+    prerequisites out of the internal-product-bug bucket on every version.
+    """
+    if category != "update" or exception is None:
+        return category, reportable, reason_code
+    try:
+        from update_failures import classify_exception
+    except ImportError:  # pragma: no cover - scripts dir is always importable
+        return category, reportable, reason_code
+    resolved, eligible, resolved_reason = classify_exception(exception)
+    if resolved == "internal":
+        return category, reportable, reason_code
+    return resolved, bool(reportable and eligible), (
+        reason_code if reason_code is not None else resolved_reason)
+
+
 def failure(operation: str, stage: str, category: str, *, exception=None,
             config=None, revision=None, elapsed_ms=None, exit_code=None,
             reportable: bool = True, reason_code=None, substage=None) -> dict:
@@ -299,6 +327,8 @@ def failure(operation: str, stage: str, category: str, *, exception=None,
         os.environ["MINDIE_DIAGNOSTICS_CONFIG"] = str(diagnostics_config_path(config))
         build = build_metadata()
         explicit = _hex(revision, 40)
+        category, reportable, reason_code = _update_policy(
+            category, exception, reportable, reason_code)
         eff_reason = reason_code if reason_code is not None else getattr(exception, "reason_code", None)
         eff_substage = substage if substage is not None else getattr(exception, "substage", None)
         eff_exit = exit_code if exit_code is not None else getattr(exception, "returncode", None)
