@@ -105,6 +105,7 @@ _CERT_PHRASES = (
 _RESOLVER_PHRASES = (
     "no solution found", "version solving failed", "resolutionimpossible",
     "conflicting dependencies", "package versions have conflicting",
+    "requirements contain conflicting urls", "unsatisfiable requirements",
     "the conflict is caused by", "resolver conflict",
     "could not resolve host", "temporary failure in name resolution",
     "name or service not known", "nodename nor servname",
@@ -317,6 +318,8 @@ def parse_markers(text) -> dict | None:
         category = value.get("category")
         stage = value.get("stage")
         reason_code = value.get("reason_code")
+        if not isinstance(category, str) or not isinstance(stage, str):
+            continue
         if category not in KNOWN_CATEGORIES or stage not in STAGES:
             continue
         if not isinstance(reason_code, str) or _REASON_RE.fullmatch(reason_code) is None:

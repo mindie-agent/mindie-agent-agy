@@ -65,8 +65,12 @@ from paths import (
     state_dir,
 )
 from update_failures import (
+    INTERNAL,
+    MAX_OUTPUT_CHARS,
+    UpdateFailure,
     attach_stage,
     child_failure,
+    classify_exception,
     emit_failure_marker,
     stage_of,
 )
@@ -444,6 +448,29 @@ def prepare(
     ):
         return None
 
+    class _TeeQueue:
+        def __init__(self, inner, out_buf: bytearray, err_buf: bytearray):
+            self._inner, self._out, self._err = inner, out_buf, err_buf
+
+        def put(self, item, *args, **kwargs):
+            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], (bytes, bytearray)):
+                sink = self._err if item[0] == "err" else self._out
+                if len(sink) < MAX_OUTPUT_CHARS:
+                    sink.extend(item[1][:MAX_OUTPUT_CHARS - len(sink)])
+            return self._inner.put(item, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    import mindie_knowledge.loop.process as loop_process
+
+    out_buf, err_buf = bytearray(), bytearray()
+    orig_reader = loop_process._reader
+
+    def tee_reader(stream, tag, chunks, cancel, errors):
+        return orig_reader(stream, tag, _TeeQueue(chunks, out_buf, err_buf), cancel, errors)
+
+    loop_process._reader = tee_reader
     try:
         artifact = build(
             source_root,
@@ -456,7 +483,18 @@ def prepare(
             files=["pyproject.toml", "product-contract.json", "harness-compatibility.json"],
         )
     except BaseException as exc:
+        if isinstance(exc, Exception) and (out_buf or err_buf) and classify_exception(exc)[0] == INTERNAL:
+            rebuilt = child_failure(
+                out_buf.decode("utf-8", errors="replace"),
+                err_buf.decode("utf-8", errors="replace"),
+                stage="uv-sync",
+                message=str(exc),
+            )
+            if isinstance(rebuilt, UpdateFailure):
+                raise rebuilt from exc
         raise attach_stage(exc, "build")
+    finally:
+        loop_process._reader = orig_reader
     return artifact
 
 

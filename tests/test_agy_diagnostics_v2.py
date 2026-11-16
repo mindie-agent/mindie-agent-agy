@@ -180,3 +180,57 @@ def test_agy_mcp_diagnostics_provenance_and_post_success_timeout_honesty(
                 saved_status = json.loads((tmp_path.resolve() / "data" / "component-update-status.json").read_text(encoding="utf-8"))
                 assert saved_status["status"] == "updated"
                 assert saved_status["receipt_unconfirmed"] is True
+
+
+@pytest.mark.parametrize(
+    "stderr_msg,expected_cat",
+    [
+        ("error: No solution found when resolving dependencies", "connectivity"),
+        ("error: failed to unpack wheel: No space left on device (os error 28)", "prerequisite"),
+        ("error: Permission denied (os error 13)", "prerequisite"),
+    ],
+)
+def test_component_build_uv_stderr_preserves_non_reportable_classification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr_msg: str, expected_cat: str
+) -> None:
+    import component_update
+    import mindie_knowledge.component_runtime as cr
+    import os
+    import shutil as sh_mod
+    import sys
+    from paths import atomic_write_json, config_path, repo_root
+    from update_failures import classify_exception, marker_line, parse_markers
+
+    assert parse_markers('mindie-update-failure: {"schema":"mindie-agy-update-failure/1","category":[],"stage":{},"reason_code":"x"}') is None
+
+    from mindie_knowledge.component_releases import COMPONENTS
+
+    cfg = config_path()
+    atomic_write_json(cfg, {"python": sys.executable, "component_commands": {}})
+    baseline = cr.source_baseline(repo_root())
+    target_rt = {
+        name: {"repository": COMPONENTS[name], "version": "9.9.9", "revision": "f" * 40}
+        for name in baseline["runtime"]
+    }
+    monkeypatch.setattr(
+        cr, "discover", lambda *_a, **_k: {"installed": {}, "runtime": target_rt, "changed": True}
+    )
+    fake_uv = tmp_path / ("uv.cmd" if os.name == "nt" else "uv")
+    if os.name == "nt":
+        fake_uv.write_text(f"@echo {stderr_msg} 1>&2\n@exit /b 1\n", encoding="utf-8")
+    else:
+        fake_uv.write_text(
+            f"#!/bin/sh\nprintf '%s\\n' \"{stderr_msg}\" >&2\nexit 1\n",
+            encoding="utf-8",
+        )
+        fake_uv.chmod(0o755)
+    monkeypatch.setattr(sh_mod, "which", lambda name, *_a, **_k: str(fake_uv) if name == "uv" else None)
+
+    with pytest.raises(Exception) as caught:
+        component_update.prepare(source=repo_root(), python=sys.executable, config=cfg, force=True, timeout=60.0)
+
+    cat, reportable, _code = classify_exception(caught.value)
+    assert cat == expected_cat
+    assert reportable is False
+    parsed = parse_markers(marker_line(caught.value, stage="uv-sync"))
+    assert parsed is not None and parsed["category"] == expected_cat
