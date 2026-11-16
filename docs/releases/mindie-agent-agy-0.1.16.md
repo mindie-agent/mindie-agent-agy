@@ -6,4 +6,4 @@
 - **常驻 MCP 运行租约（`mcp_server.py`）**：常驻 stdio 服务对 `owning_dir(sys.executable)` 指向的受管代目录持有 `acquire_runtime_lease` 共享租约，贯穿整个服务生命周期；并发退役无法在解释器服务期间移走该代目录，缺失或只读代目录降级为无租约而不阻断启动。
 - **避免重复构建基线 `agy-venv`（`setup.py`）**：当 profile 记录的 `current_python` 仍可导入运行时 API 时，直接在该解释器内执行组件升级；仅在没有可用解释器时冷启动构建 `agy-venv`，且未显式设置 `UV_CACHE_DIR` 时把缓存固定到同卷 `<data_home>/.uv-cache`，避免跨卷全量复制。
 - **测试隔离修正（`tests/test_runtime_upgrade.py`）**：移除在 `ROOT.parent` 创建 `mindie-upgrade-*` 临时目录的污染路径，改用 `tmp_path` 并保留确定性清理与父目录断言；新增 `tests/test_storage_lifecycle_agy.py` 覆盖多代回收、并发互斥、真实子进程租约保护与 NTFS `PermissionError` 零半删退避。
-- **组件版本锁定**：`mindie-knowledge` 0.13.22、`remote-dev` 0.11.12、`mindie-diagnostics` 0.5.14、`mindie-coordinator` 0.7.11、`mindie-debugger` 0.1.3、`mindie-profiler` 0.5.15、`mindie-sim` 0.9.15、`npu-top` 0.3.4（`pyproject.toml` 的 `[tool.uv.sources]` / `override-dependencies` 锁定正式提交，`uv.lock` 同步更新）。
+- **组件版本锁定**：`mindie-knowledge` 0.13.22、`remote-dev` 0.11.12、`mindie-diagnostics` 0.5.15、`mindie-coordinator` 0.7.11、`mindie-debugger` 0.1.3、`mindie-profiler` 0.5.15、`mindie-sim` 0.9.15、`npu-top` 0.3.4（`pyproject.toml` 的 `[tool.uv.sources]` / `override-dependencies` 锁定正式提交，`uv.lock` 同步更新）。
