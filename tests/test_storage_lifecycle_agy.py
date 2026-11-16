@@ -9,6 +9,7 @@ subprocess holding an `acquire_runtime_lease`, and the zero-half-delete
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -246,10 +247,12 @@ def test_upgrade_silently_reclaims_legacy_baggage_and_protects_borrowed_and_exte
     assert sum(1 for source in old_sources if source.is_dir()) == 1
     assert not retired_state_sources[0].exists()
     assert all(source.is_dir() for source in retired_state_sources[1:])
-    # The explicit rollback pin plus the newest unprotected stale generation
-    # occupy the two-generation retention window; older baggage is reclaimed.
+    # Protection never consumes a retention slot: the persisted rollback pin
+    # stays protected while the two newest unprotected stale generations keep
+    # their own retention window.
     assert stale[0].is_dir()
-    assert not any(gen.exists() for gen in stale[1:])
+    assert stale[1].is_dir()
+    assert not any(gen.exists() for gen in stale[2:])
     assert not staging.exists()
     # The external user Git checkout is byte-for-byte untouched.
     assert _tree_digest(external) == external_digest
@@ -592,3 +595,197 @@ def test_repository_parent_has_no_upgrade_temp_residue():
     residue = sorted(Path(REPO_ROOT.parent).glob("mindie-upgrade-*"))
     assert residue == []
     assert sorted(REPO_ROOT.glob("mindie-upgrade-*")) == []
+
+
+def test_rollback_generation_survives_both_phases_with_two_newer_candidates(
+        upgrade_env, monkeypatch: pytest.MonkeyPatch):
+    """Astra R1 P1: Phase 2 must never delete the rollback generation Phase 1 kept."""
+    import component_update
+    import mindie_knowledge.storage as storage
+
+    _freeze_process_inspection(monkeypatch)
+    cfg_file = upgrade_env["cfg_file"]
+    data = upgrade_env["data"]
+    runtimes = upgrade_env["runtimes"]
+    now = time.time()
+    # R is older than two unactivated candidates and has no live process in it.
+    rollback = _make_generation(runtimes, "gen-rollback", mtime=now - 6000, marker="rollback")
+    candidates = [
+        _make_generation(runtimes, "gen-candidate-1", mtime=now - 2000, marker="candidate-1"),
+        _make_generation(runtimes, "gen-candidate-2", mtime=now - 2100, marker="candidate-2"),
+    ]
+    active = _make_generation(runtimes, "gen-active", mtime=now, marker="active")
+    _write_profile(cfg_file, python=_venv_python(rollback), source_root=REPO_ROOT,
+                   state_dir=data / "agy-state")
+    monkeypatch.setattr(component_update, "prepare", lambda *a, **kw: _artifact(active))
+
+    observed: dict[str, bool] = {}
+    real_prune = storage.prune_component_runtimes
+    real_sweep = storage.sweep_legacy_installations
+
+    def prune_spy(*args, **kwargs):
+        observed["prune"] = storage.is_lease_held(rollback)
+        return real_prune(*args, **kwargs)
+
+    def sweep_spy(*args, **kwargs):
+        observed["sweep"] = storage.is_lease_held(rollback)
+        return real_sweep(*args, **kwargs)
+
+    monkeypatch.setattr(storage, "prune_component_runtimes", prune_spy)
+    monkeypatch.setattr(storage, "sweep_legacy_installations", sweep_spy)
+
+    result = component_update.check(config=cfg_file, source=REPO_ROOT)
+
+    assert result["status"] == "updated"
+    assert result["cleanup"]["prune"]["status"] == "completed"
+    assert result["cleanup"]["sweep"]["status"] == "completed"
+    # The rollback generation is leased across BOTH phases, not merely passed
+    # as a Phase-1 keep path.
+    assert observed == {"prune": True, "sweep": True}
+    assert rollback.is_dir()
+    assert all(candidate.is_dir() for candidate in candidates)
+    assert active.is_dir()
+    # The pin is durable: the switch persisted the rollback interpreter, so a
+    # later maintenance tick (no lease, no live process) still keeps it.
+    adapter = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert Path(adapter["previous_python"]) == _venv_python(rollback)
+    assert not storage.is_lease_held(rollback)
+    later = storage.sweep_legacy_installations(force=True)
+    assert later["status"] in {"completed", "inspection_incomplete"}
+    assert rollback.is_dir()
+
+
+def test_intermediate_symlink_into_external_git_checkout_is_never_swept(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Astra R1 P1: `agy-state -> <repo>/state` must not become a deletion root."""
+    import paths
+    import storage_lifecycle
+    from mindie_knowledge.storage import sweep_legacy_installations
+
+    _freeze_process_inspection(monkeypatch)
+    external = tmp_path / "external-user-repo"
+    victim = _make_generation(external / "generated-state" / "component-runtimes",
+                              "gen-victim", mtime=time.time() - 9000, marker="victim")
+    (external / ".git").mkdir(parents=True)
+    (external / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (external / "pyproject.toml").write_text("[project]\nname='user-repo'\n", encoding="utf-8")
+    data = paths.data_home()
+    state = data / "agy-state"
+    try:
+        state.symlink_to(external / "generated-state", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable on this host")
+    digest = _tree_digest(external)
+
+    report = storage_lifecycle.reclaim_after_switch(
+        runtimes_root=state / "component-runtimes",
+        keep_python=(_venv_python(victim),),
+        forbidden_roots=[external],
+        data_home=data,
+        state_root=state,
+        budget_seconds=2.0,
+    )
+
+    assert report["prune"]["status"] == "skipped_link"
+    assert report["status"] == "partial"
+    assert report["warnings"] and "link" in report["warnings"][0]
+    assert victim.is_dir()
+    assert _tree_digest(external) == digest
+
+    sweep = sweep_legacy_installations(force=True)
+    assert victim.is_dir()
+    assert _tree_digest(external) == digest
+    assert any("protected target" in warning for warning in sweep["warnings"])
+
+
+def test_inherited_host_home_env_is_isolated_and_never_scanned(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Astra R1 P1: an inherited `CODEX_HOME` must not make tests scan the host."""
+    import conftest
+    import mindie_knowledge.storage as storage
+
+    sentinel = tmp_path / "inherited-host-codex"
+    updates = sentinel / "plugins" / "data" / "mindie-agent-mindie-agent" / "codex.updates"
+    updates.mkdir(parents=True)
+    victims = []
+    for index in range(10):
+        item = updates / f"superseded-{index:02d}.json"
+        item.write_text("{}\n", encoding="utf-8")
+        os.utime(item, (1000 + index, 1000 + index))
+        victims.append(item)
+    monkeypatch.setenv("CODEX_HOME", str(sentinel))
+
+    fresh = tmp_path / "fresh"
+    conftest.isolate_environment(fresh, monkeypatch)
+
+    for name in conftest.HOST_HOME_ENV_VARS:
+        assert Path(os.environ[name]).is_relative_to(fresh), name
+    assert Path(os.environ["CODEX_HOME"]) == fresh / "codex"
+
+    storage.sweep_legacy_installations(force=True)
+
+    assert all(item.is_file() for item in victims)
+    assert sentinel.is_dir()
+
+
+def test_update_transport_and_prerequisite_failures_are_not_internal(
+        monkeypatch: pytest.MonkeyPatch):
+    """#360 class: resolver/busy/deferred/prerequisite are never product bugs."""
+    import diagnostic_support
+
+    seen: list[dict] = []
+
+    def capture(_record_fn, _component, _operation, **kwargs):
+        seen.append(dict(kwargs))
+        return {"recorded": True, "incident_id": None, "logging_failed": False}
+
+    monkeypatch.setattr(diagnostic_support, "_invoke_record", capture)
+
+    resolver = RuntimeError("name resolution failure")
+    resolver.category = "resolver"
+    diagnostic_support.failure("component.update", "prepare", "update", exception=resolver)
+    assert seen[-1]["category"] == "connectivity"
+    assert seen[-1]["reportable"] is False
+    assert seen[-1]["reason_code"] == "update_transport_unavailable"
+
+    for category in ("busy", "deferred", "prerequisite"):
+        deferred = RuntimeError("stage is deferred")
+        deferred.category = category
+        diagnostic_support.failure("component.update", "prepare", "update", exception=deferred)
+        assert seen[-1]["category"] == "prerequisite"
+        assert seen[-1]["reportable"] is False
+
+    class LockTimeout(TimeoutError):
+        pass
+
+    for exception in (LockTimeout("lock busy"), PermissionError(13, "denied"),
+                      OSError(errno.ENOSPC, "no space left on device")):
+        diagnostic_support.failure("component.update", "prepare", "update", exception=exception)
+        assert seen[-1]["category"] == "prerequisite"
+        assert seen[-1]["reportable"] is False
+        assert seen[-1]["reason_code"] == "update_prerequisite_unavailable"
+
+    # A genuine product fault keeps the internal classification.
+    diagnostic_support.failure("component.update", "prepare", "update",
+                               exception=RuntimeError("candidate manifest is corrupt"))
+    assert seen[-1]["category"] == "update"
+    assert seen[-1]["reportable"] is True
+
+
+def test_cleanup_warning_reports_degraded_sub_phase_statuses():
+    from storage_lifecycle import cleanup_warning
+
+    assert cleanup_warning({
+        "status": "completed",
+        "prune": {"status": "completed"},
+        "sweep": {"status": "skipped_cooldown"},
+    }) is None
+    warning = cleanup_warning({
+        "status": "partial",
+        "prune": {"status": "unreadable", "reclaimed_dirs": 0, "deferred_dirs": 0,
+                  "warnings": ["scan: PermissionError"]},
+        "sweep": {"status": "completed", "reclaimed_dirs": 2, "deferred_dirs": 1},
+    })
+    assert warning.startswith("post-update cleanup: reclaimed=2, deferred=1")
+    assert "status=partial,unreadable" in warning
+    assert "scan: PermissionError" in warning

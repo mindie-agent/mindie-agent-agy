@@ -17,8 +17,8 @@ without requiring a new `mindie-agent-agy` plugin release.
 - One cross-process update mutex (`<data_home>/agy-component-update.lock`)
   serializes `check()`; contention returns `status="busy"` after a bounded wait.
 - After the atomic switch, a bounded best-effort cleanup retires superseded
-  generations and legacy baggage, keeping `status="updated"` + `cleanup_warning`
-  when deferred; never writes `~/.gemini` or activates a session lease.
+  generations and legacy baggage, persisting `previous_python` and keeping
+  `status="updated"` + `cleanup_warning`; failures keep a structured category.
 
 [Timeouts & Locks]
 - Enclosing budget defaults to `540.0s`: `15.0s` metadata read, `120.0s` release
@@ -29,8 +29,8 @@ without requiring a new `mindie-agent-agy` plugin release.
 
 [Side-Effect Policy]
 - Writes candidate runtime generations under `state_dir()/component-runtimes`,
-  atomically updates `agy.json` / `agy.engine.json` when a newer component
-  release is activated, and delegates bounded silent reclamation of superseded
+  atomically updates `agy.json` (including the `previous_python` rollback pin) /
+  `agy.engine.json`, and delegates bounded silent reclamation of superseded
   generations to `mindie_knowledge.storage`.
 """
 
@@ -63,6 +63,12 @@ from paths import (
     read_json,
     repo_root,
     state_dir,
+)
+from update_failures import (
+    attach_stage,
+    child_failure,
+    emit_failure_marker,
+    stage_of,
 )
 
 UPDATE_CHECK_INTERVAL = 300.0
@@ -371,7 +377,10 @@ def compatible_runtime(python: str, *, source=None, config=None, timeout: float 
     result = bounded_run(command, "", timeout=remaining - 15.0,
                          max_output=256 * 1024, env=apply_enterprise_transport_env(dict(os.environ)))
     if result.returncode != 0:
-        raise RuntimeError(f"runtime candidate preparation failed: {(result.stderr or result.stdout)[-1000:]}")
+        detail = (result.stderr or result.stdout or "").strip()[-1000:]
+        raise child_failure(
+            result.stdout, result.stderr, stage="prepare",
+            message=f"runtime candidate preparation failed: {detail}")
     artifact = json.loads(result.stdout)
     candidate = artifact.get("python") if isinstance(artifact, dict) else None
     if not candidate or not probe(candidate):
@@ -407,14 +416,20 @@ def prepare(
     current_python = _norm_python_path(python or adapter.get("python") or sys.executable)
 
     required = required_components(adapter, timeout=min(15.0, remaining(5.0)))
-    baseline = source_baseline(source_root)
-    selected = discover(
-        current_python,
-        baseline["runtime"],
-        force=force,
-        required_components=required,
-        catalog=Catalog(budget=min(120.0, remaining(20.0))),
-    )
+    try:
+        baseline = source_baseline(source_root)
+    except BaseException as exc:
+        raise attach_stage(exc, "discover")
+    try:
+        selected = discover(
+            current_python,
+            baseline["runtime"],
+            force=force,
+            required_components=required,
+            catalog=Catalog(budget=min(120.0, remaining(20.0))),
+        )
+    except BaseException as exc:
+        raise attach_stage(exc, "discover")
     needs_binding = bool(adapter.get("component_commands")) and (
         rebind_commands(adapter, current_python, selected["runtime"]) != adapter.get("component_commands")
     )
@@ -429,16 +444,19 @@ def prepare(
     ):
         return None
 
-    artifact = build(
-        source_root,
-        state_dir(cfg_file) / "component-runtimes",
-        baseline,
-        selected["runtime"],
-        python=current_python,
-        timeout=min(420.0, remaining(5.0)),
-        env=apply_enterprise_transport_env(dict(os.environ)),
-        files=["pyproject.toml", "product-contract.json", "harness-compatibility.json"],
-    )
+    try:
+        artifact = build(
+            source_root,
+            state_dir(cfg_file) / "component-runtimes",
+            baseline,
+            selected["runtime"],
+            python=current_python,
+            timeout=min(420.0, remaining(5.0)),
+            env=apply_enterprise_transport_env(dict(os.environ)),
+            files=["pyproject.toml", "product-contract.json", "harness-compatibility.json"],
+        )
+    except BaseException as exc:
+        raise attach_stage(exc, "build")
     return artifact
 
 
@@ -505,7 +523,10 @@ def _reclaim_after_switch(cfg_file, *, adapter, previous_python, active_python, 
 
         report = reclaim_after_switch(
             runtimes_root=state_dir(cfg_file) / "component-runtimes",
-            keep_python=(previous_python, active_python),
+            keep_python=(previous_python, active_python,
+                         adapter.get("previous_python")),
+            data_home=data_home(),
+            state_root=state_dir(cfg_file),
             forbidden_roots=_checkout_forbidden_roots(
                 adapter, config=cfg_file, source=source),
         )
@@ -584,6 +605,7 @@ def _check_locked(
         updated_adapter = dict(adapter)
         updated_adapter["python"] = new_python
         updated_adapter["component_runtime"] = artifact["components"]
+        updated_adapter["previous_python"] = _norm_python_path(current_python)
         if updated_adapter.get("component_commands"):
             updated_adapter["component_commands"] = rebind_commands(
                 updated_adapter,
@@ -706,18 +728,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=540.0, help="Total update timeout in seconds")
     args = parser.parse_args(argv)
     if args.prepare_only:
-        payload = prepare(source=args.source, python=args.python or sys.executable,
-                          config=args.config, force=args.force, timeout=args.timeout)
+        try:
+            payload = prepare(source=args.source, python=args.python or sys.executable,
+                              config=args.config, force=args.force, timeout=args.timeout)
+        except BaseException as exc:
+            emit_failure_marker(exc, stage=stage_of(exc, "prepare"))
+            raise
         sys.stdout.buffer.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
         sys.stdout.buffer.flush()
         return 0
-    payload = check(
-        config=args.config,
-        source=args.source,
-        force=args.force,
-        sync_feeds=args.sync_feeds,
-        timeout=args.timeout,
-    )
+    try:
+        payload = check(
+            config=args.config,
+            source=args.source,
+            force=args.force,
+            sync_feeds=args.sync_feeds,
+            timeout=args.timeout,
+        )
+    except BaseException as exc:
+        emit_failure_marker(exc, stage=stage_of(exc, "update"))
+        raise
     sys.stdout.buffer.write((json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
     sys.stdout.buffer.flush()
     return 0 if payload.get("status") in {"updated", "up_to_date"} else 1

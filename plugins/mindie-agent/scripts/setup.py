@@ -15,6 +15,9 @@ the persistent component virtualenv (`agy-venv`) and LF-normalized source baseli
   baseline `agy-venv` is rebuilt; `agy-venv` is staged only when no usable
   interpreter exists.
 - Never writes into `~/.gemini`.
+- Child `uv`/(`--prepare-only`) failures keep a structured stage and transport
+  class via `update_failures`; a missing `uv` is a local prerequisite, never a
+  reportable product bug.
 
 [Timeouts & Locks]
 - Local config validation/writes are immediate; first-time `uv sync` runtime
@@ -71,6 +74,13 @@ from paths import (
 )
 import setup_sharing
 from storage_lifecycle import configure_uv_cache
+from update_failures import (
+    UpdateFailure,
+    attach_stage,
+    child_failure,
+    emit_failure_marker,
+    stage_of,
+)
 
 BOOTSTRAP_TIMEOUT = 540.0
 BOOTSTRAP_CLEANUP_GRACE = 5.0
@@ -270,30 +280,36 @@ def ensure_runtime_python(
     src_root = stage_source_baseline(source_root)
     uv = which_native("uv")
     if uv is None:
-        raise RuntimeError("uv is required to bootstrap the MindIE Antigravity runtime")
-
+        raise UpdateFailure(
+            "uv is required to bootstrap the MindIE Antigravity runtime",
+            category="prerequisite", stage="uv-sync")
     env = apply_enterprise_transport_env(dict(os.environ))
     env["UV_PROJECT_ENVIRONMENT"] = str(venv_dir)
     configure_uv_cache(venv_dir, env)
-    proc = bounded_run(
-        [
-            uv,
-            "sync",
-            "--project",
-            str(src_root),
-            "--all-extras",
-            "--no-dev",
-            "--python",
-            "3.13",
-        ],
-        "",
-        timeout=timeout,
-        max_output=256 * 1024,
-        env=env,
-    )
+    try:
+        proc = bounded_run(
+            [
+                uv,
+                "sync",
+                "--project",
+                str(src_root),
+                "--all-extras",
+                "--no-dev",
+                "--python",
+                "3.13",
+            ],
+            "",
+            timeout=timeout,
+            max_output=256 * 1024,
+            env=env,
+        )
+    except BaseException as exc:
+        raise attach_stage(exc, "uv-sync")
     if proc.returncode != 0 or not venv_py.is_file():
         detail = (proc.stderr or proc.stdout or "").strip()[-1000:]
-        raise RuntimeError(f"uv sync failed while bootstrapping agy-venv (exit {proc.returncode}): {detail}")
+        raise child_failure(
+            proc.stdout, proc.stderr, stage="uv-sync",
+            message=f"uv sync failed while bootstrapping agy-venv (exit {proc.returncode}): {detail}")
     return verified(_norm_python_path(venv_py))
 
 
@@ -597,7 +613,11 @@ def main(argv: list[str] | None = None) -> int:
         and os.environ.get("_MINDIE_AGY_SETUP_BOOTSTRAPPED") != "1"
     ):
         source = _discover_checkout_source() or repo_root(args.config)
-        target_py = ensure_runtime_python(source, config=args.config, timeout=args.timeout)
+        try:
+            target_py = ensure_runtime_python(source, config=args.config, timeout=args.timeout)
+        except BaseException as exc:
+            emit_failure_marker(exc, stage=stage_of(exc, "bootstrap"))
+            raise
         staged_src = stage_source_baseline(source)
         env = apply_enterprise_transport_env(dict(os.environ))
         env["_MINDIE_AGY_SETUP_BOOTSTRAPPED"] = "1"
@@ -620,22 +640,30 @@ def main(argv: list[str] | None = None) -> int:
         return int(proc.returncode)
 
     if args.cmd == "init":
-        result = ensure_default_profile(
-            config=args.config,
-            workspace_root=args.workspace_root,
-            domain=args.domain,
-        )
+        try:
+            result = ensure_default_profile(
+                config=args.config,
+                workspace_root=args.workspace_root,
+                domain=args.domain,
+            )
+        except BaseException as exc:
+            emit_failure_marker(exc, stage=stage_of(exc, "init"))
+            raise
     elif args.cmd == "sharing":
-        result = configure_community(
-            config=args.config,
-            enabled=bool(args.enable),
-            fork=args.fork,
-            account=args.account,
-            project_root=args.project_root,
-            remote_project_root=args.remote_project_root,
-            visibility=args.visibility,
-            repository=args.repository,
-        )
+        try:
+            result = configure_community(
+                config=args.config,
+                enabled=bool(args.enable),
+                fork=args.fork,
+                account=args.account,
+                project_root=args.project_root,
+                remote_project_root=args.remote_project_root,
+                visibility=args.visibility,
+                repository=args.repository,
+            )
+        except BaseException as exc:
+            emit_failure_marker(exc, stage=stage_of(exc, "init"))
+            raise
     else:
         parser.error("a command is required: init | sharing")
     _emit_json(result)
