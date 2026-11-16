@@ -80,9 +80,22 @@ def _is_link(path: Path) -> bool:
         return True
 
 
+def _strip_win_prefix(text: str) -> str:
+    if text[:8].upper() == "\\\\?\\UNC\\":
+        return "\\\\" + text[8:]
+    if text.startswith("\\\\?\\") or text.startswith("//?/"):
+        return text[4:]
+    return text
+
+
+def _plain_path(value) -> Path:
+    raw = _strip_win_prefix(os.fspath(value).strip())
+    return Path(os.path.normpath(os.path.abspath(os.path.expanduser(raw))))
+
+
 def _first_link(anchor: Path, target: Path) -> Path | None:
     """First link component between `anchor` (inclusive) and `target`."""
-    start, destination = Path(anchor), Path(target)
+    start, destination = _plain_path(anchor), _plain_path(target)
     try:
         relative = destination.relative_to(start)
     except ValueError:
@@ -114,17 +127,19 @@ def _skipped_prune(root: Path, status: str, warnings: list[str]) -> dict:
 
 def _root_anchor(component_root: Path, data_home, state_root) -> Path:
     """Nearest configured storage root that contains the runtimes root."""
+    root = _plain_path(component_root)
     for candidate in (data_home, state_root):
         if candidate is None:
             continue
         try:
-            if component_root.is_relative_to(Path(candidate)):
-                return Path(candidate)
+            plain = _plain_path(candidate)
+            if _is_within(root, plain):
+                return plain
         except TimeoutError:
             raise
         except (OSError, ValueError):
             continue
-    return component_root.parent
+    return root.parent
 
 
 def _component_root_guard(component_root: Path, *, data_home, state_root,
@@ -176,6 +191,7 @@ def _protected_owning_dirs(keep, *, anchor: Path, known_roots) -> list[Path]:
             owner = None
         if owner is None:
             continue
+        owner = _plain_path(owner)
         try:
             if not owner.is_dir():
                 continue
@@ -189,7 +205,7 @@ def _protected_owning_dirs(keep, *, anchor: Path, known_roots) -> list[Path]:
             continue
         if not any(_is_within(owner, item) for item in known_roots):
             continue
-        key = os.path.normcase(str(_resolved(owner)))
+        key = os.path.normcase(str(_plain_path(_resolved(owner))))
         if key in seen:
             continue
         seen.add(key)
@@ -199,11 +215,13 @@ def _protected_owning_dirs(keep, *, anchor: Path, known_roots) -> list[Path]:
 
 def _is_within(path: Path, root: Path) -> bool:
     try:
-        return Path(path).is_relative_to(Path(root))
+        lhs, rhs = str(_plain_path(path)), str(_plain_path(root))
+        common = os.path.commonpath((lhs, rhs))
     except TimeoutError:
         raise
-    except (OSError, ValueError):
+    except (OSError, TypeError, ValueError):
         return False
+    return os.path.normcase(common) == os.path.normcase(rhs)
 
 
 @contextlib.contextmanager
@@ -211,6 +229,7 @@ def _held_protected_leases(directories, *, runtimes_root: Path, report: dict):
     """Hold temporary `RuntimeLease`s so BOTH reclaim phases keep each owner."""
     from mindie_knowledge.storage import acquire_runtime_lease
 
+    ok = True
     with contextlib.ExitStack() as stack:
         for directory in directories:
             try:
@@ -218,9 +237,9 @@ def _held_protected_leases(directories, *, runtimes_root: Path, report: dict):
             except TimeoutError:
                 raise
             except Exception as exc:  # noqa: BLE001 - cleanup never fails a switch
-                if _is_within(directory, runtimes_root):
-                    report["warnings"].append("lease " + type(exc).__name__)
-        yield
+                ok = False
+                report["warnings"].append("lease " + type(exc).__name__)
+        yield ok
 
 
 def _existing_ancestor(path: Path) -> Path | None:
@@ -400,13 +419,13 @@ def _normalized(values) -> list[Path]:
         if value is None:
             continue
         try:
-            path = Path(os.fspath(value)).expanduser()
+            path = _plain_path(value)
         except (TypeError, ValueError):
             continue
         if not path.is_absolute():
             continue
         try:
-            key = os.path.normcase(str(path.resolve()))
+            key = os.path.normcase(str(_plain_path(path.resolve())))
         except TimeoutError:
             raise
         except OSError:
@@ -445,7 +464,7 @@ def reclaim_after_switch(*, runtimes_root: str | Path, keep_python=(),
     started = time.monotonic()
     budget = max(0.0, float(budget_seconds))
     limit = started + budget
-    root = Path(runtimes_root)
+    root = _plain_path(runtimes_root)
     keep = _normalized(keep_python)
     forbidden = _normalized(forbidden_roots)
     report: dict = {
@@ -458,9 +477,9 @@ def reclaim_after_switch(*, runtimes_root: str | Path, keep_python=(),
     }
     prune_limit = min(limit, time.monotonic() + budget * PRUNE_BUDGET_SHARE)
     anchor = _root_anchor(root, data_home, state_root)
-    known_roots = [root] + [Path(item) for item in (data_home, state_root) if item is not None]
+    known_roots = [root] + [_plain_path(item) for item in (data_home, state_root) if item is not None]
     leased = _protected_owning_dirs(keep, anchor=anchor, known_roots=known_roots)
-    with _held_protected_leases(leased, runtimes_root=root, report=report):
+    with _held_protected_leases(leased, runtimes_root=root, report=report) as leases_ok:
         guard = _component_root_guard(
             root, data_home=data_home, state_root=state_root,
             forbidden=forbidden, deadline=prune_limit)
@@ -483,7 +502,9 @@ def reclaim_after_switch(*, runtimes_root: str | Path, keep_python=(),
             except Exception as exc:  # noqa: BLE001 - cleanup never fails a switched update
                 report["status"] = "partial"
                 report["warnings"].append("runtime prune " + type(exc).__name__)
-        if time.monotonic() < limit:
+        if not leases_ok:
+            report["status"] = "partial"
+        elif time.monotonic() < limit:
             try:
                 report["sweep"] = sweep_legacy_installations(
                     budget_seconds=max(0.0, limit - time.monotonic()),
