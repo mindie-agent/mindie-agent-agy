@@ -8,8 +8,9 @@ Serves public MCP discovery (`tools/list`) and tool execution (`tools/call`) for
 - Default MCP discovery (`tools/list`) NEVER exposes `knowledge_*` tool names,
   descriptions, or schemas—even if a session has activated `/mindie-agent`.
 - Deterministic tools (`remote_*`, `profiler`, `sim`, `coordinator`,
-  `diagnostics_*`, `mindie_status`) work in ordinary sessions without requiring
-  a knowledge lease.
+  `diagnostics_*`, `mindie_status`) work over standard MCP `tools/call` with
+  zero pre-call session binding or knowledge lease (`PreToolUse` binds and
+  `AGY_CONVERSATION_ID` are opportunistic hints, falling back to `_CONNECTION_SESSION_ID`).
 - Receipt Honesty: once a remote/component operation succeeds, a local SQLite
   `finish`/`finish_bind` `OSError` or `sqlite3.Error` keeps `isError=False` and
   attaches `receipt_warning` + `receipt_unconfirmed=True` so the caller never
@@ -176,10 +177,20 @@ class RemoteReceipts:
         try:
             with db:
                 db.execute("BEGIN IMMEDIATE")
+                if db.execute("SELECT 1 FROM receipts WHERE call_id=?", (call_id,)).fetchone() is not None:
+                    raise ValueError("Duplicate MCP request; replay rejected")
                 db.execute(
-                    "INSERT OR REPLACE INTO receipts VALUES(?,?,?,?,?,?,?)",
+                    "INSERT INTO receipts VALUES(?,?,?,?,?,?,?)",
                     (call_id, session, tool, digest, "running", now, now),
                 )
+        finally:
+            db.close()
+
+    def set_session(self, call_id: str, session: str) -> None:
+        db = self._connect()
+        try:
+            with db:
+                db.execute("UPDATE receipts SET session=? WHERE call_id=?", (session, call_id))
         finally:
             db.close()
 
@@ -316,12 +327,30 @@ def _resolve_component_command(component: str, *, config=None) -> list[str]:
     return [str(python_exe), "-I", "-X", "utf8", "-m", module_map[component]]
 
 
+_CONNECTION_SESSION_ID = os.environ.get("MINDIE_MCP_CONNECTION_ID") or f"agy-mcp-{os.getpid()}-{uuid.uuid4().hex[:12]}"
+
+
+def _rpc_receipt_id(surface: str, rpc_id) -> str:
+    if rpc_id is None:
+        return str(uuid.uuid4())
+    return f"{_CONNECTION_SESSION_ID}:{surface}:rpc:{json.dumps(rpc_id, sort_keys=True)}"
+
+
 def _resolve_session(surface: str, tool_name: str, arguments: dict, *, config=None) -> tuple[str, str | None]:
-    """Resolve session identity from a `PreToolUse` bind or `AGY_CONVERSATION_ID`."""
+    """Resolve optional session identity from `PreToolUse`, `AGY_CONVERSATION_ID`, or connection scope."""
     if bind_db_path(config).is_file():
-        bound = claim_bind(surface, tool_name, arguments, config=config)
-        return bound["session"], bound["bind_id"]
-    return require_session(os.environ.get("AGY_CONVERSATION_ID")), None
+        try:
+            bound = claim_bind(surface, tool_name, arguments, config=config)
+            return bound["session"], bound["bind_id"]
+        except TimeoutError:
+            raise
+        except ValueError as exc:
+            if "no active PreToolUse bind" not in str(exc) and "no native PreToolUse bind" not in str(exc):
+                raise
+    raw_env = os.environ.get("AGY_CONVERSATION_ID")
+    if isinstance(raw_env, str) and raw_env.strip():
+        return require_session(raw_env), None
+    return _CONNECTION_SESSION_ID, None
 
 
 def _admission_failure(exc):
@@ -358,13 +387,31 @@ def call_tools_surface(
     name: str,
     arguments: dict | None = None,
     *,
+    rpc_id=None,
     config=None,
     receipts: RemoteReceipts | None = None,
 ) -> dict:
     args = dict(arguments or {})
+    receipt_store = receipts if receipts is not None or rpc_id is not None else None
+    if receipt_store is None and rpc_id is not None:
+        receipt_store = RemoteReceipts(remote_receipts_path(config))
+    call_id = _rpc_receipt_id("tools", rpc_id)
+    reserved = False
     try:
+        if receipt_store is not None:
+            receipt_store.begin(call_id, _CONNECTION_SESSION_ID, name, args)
+            reserved = True
         session, bind_id = _resolve_session("tools", name, args, config=config)
+        if receipt_store is not None and session != _CONNECTION_SESSION_ID and hasattr(receipt_store, "set_session"):
+            receipt_store.set_session(call_id, session)
     except Exception as exc:
+        if reserved and receipt_store is not None:
+            try:
+                receipt_store.finish(call_id, "failed")
+            except TimeoutError:
+                raise
+            except (OSError, sqlite3.Error):
+                pass
         return _admission_failure(exc)
     succeeded = False
     try:
@@ -474,6 +521,15 @@ def call_tools_surface(
             isError=True,
         )
 
+    if receipt_store is not None:
+        try:
+            receipt_store.finish(call_id, "succeeded" if succeeded else "failed")
+        except (TimeoutError, OSError, sqlite3.Error) as exc:
+            if not succeeded and isinstance(exc, TimeoutError):
+                raise
+            if succeeded:
+                result = _attach_accounting_warning(result, "receipt_warning", exc)
+
     if bind_id is not None:
         try:
             finish_bind(bind_id, succeeded, config=config)
@@ -489,16 +545,28 @@ def call_remote_surface(
     name: str,
     arguments: dict | None = None,
     *,
+    rpc_id=None,
     config=None,
     receipts: RemoteReceipts | None = None,
 ) -> dict:
     args = dict(arguments or {})
+    reserved = False
     try:
-        session, bind_id = _resolve_session("remote", name, args, config=config)
         receipt_store = receipts or RemoteReceipts(remote_receipts_path(config))
-        call_id = str(uuid.uuid4())
-        receipt_store.begin(call_id, session, name, args)
+        call_id = _rpc_receipt_id("remote", rpc_id)
+        receipt_store.begin(call_id, _CONNECTION_SESSION_ID, name, args)
+        reserved = True
+        session, bind_id = _resolve_session("remote", name, args, config=config)
+        if session != _CONNECTION_SESSION_ID and hasattr(receipt_store, "set_session"):
+            receipt_store.set_session(call_id, session)
     except Exception as exc:
+        if reserved:
+            try:
+                receipt_store.finish(call_id, "failed")
+            except TimeoutError:
+                raise
+            except (OSError, sqlite3.Error):
+                pass
         return _admission_failure(exc)
 
     os.environ.setdefault("MINDIE_DIAGNOSTICS_CONFIG", str(diagnostics_config_path(config)))
@@ -603,9 +671,9 @@ def handle_rpc(request: dict, surface: str, *, config=None, receipts: RemoteRece
                 error=dict(code=-32602, message="MCP tools/call requires a tool name"),
             )
         if surface == "remote":
-            outcome = call_remote_surface(name, arguments, config=config, receipts=receipts)
+            outcome = call_remote_surface(name, arguments, rpc_id=req_id, config=config, receipts=receipts)
         else:
-            outcome = call_tools_surface(name, arguments, config=config, receipts=receipts)
+            outcome = call_tools_surface(name, arguments, rpc_id=req_id, config=config, receipts=receipts)
         return dict(jsonrpc="2.0", id=req_id, result=outcome)
     return dict(
         jsonrpc="2.0",
@@ -664,15 +732,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if "--once" not in argv:
         from remote_dev.mcp.catalog_refresh import profile_selection, serve_selected
-
         # The resident front keeps its generation leased while it dispatches
         # per-request helpers; otherwise a post-switch prune could retire the
         # interpreter and payload it is still selecting from.
-        with hold_runtime_lease():
-            return serve_selected(lambda: profile_selection(
+        def _select():
+            sel_argv, sel_env = profile_selection(
                 config_path(), Path(__file__).resolve().parent, surface,
                 config_env="MINDIE_AGENT_CONFIG", plugin_env="AGY_PLUGIN_ROOT",
-            ))
+            )
+            return sel_argv, {**sel_env, "MINDIE_MCP_CONNECTION_ID": _CONNECTION_SESSION_ID}
+
+        with hold_runtime_lease():
+            return serve_selected(_select)
     return serve(surface)
 
 

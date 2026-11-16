@@ -50,7 +50,7 @@ def test_uncertain_result_stays_unknown_in_receipt(session, tmp_path, monkeypatc
         assert db.execute("SELECT status FROM receipts").fetchone()[0] == "unknown"
 
 
-def test_consumed_bind_cannot_reuse_previous_session_or_native_environment(session, tmp_path, monkeypatch):
+def test_consumed_bind_never_leaks_previous_session_to_hookless_next_session(session, tmp_path, monkeypatch):
     from identity import publish_bind
 
     session_a = "454c6ee9-afea-47be-8188-abb9c7fb1f26"
@@ -60,30 +60,26 @@ def test_consumed_bind_cannot_reuse_previous_session_or_native_environment(sessi
     publish_bind(session_a, "remote", "remote_auth", arguments)
     assert invoke("remote_auth", arguments, receipts=receipts)["isError"] is False
     monkeypatch.setenv("AGY_CONVERSATION_ID", session_b)
-    rejected = invoke("remote_auth", arguments, receipts=receipts)
-    assert rejected["isError"] is True
-    assert rejected["structuredContent"]["execution"] == "not_started"
-    with sqlite3.connect(receipts.path) as db:
-        assert db.execute("SELECT session FROM receipts").fetchall() == [(session_a,)]
-    publish_bind(session_b, "remote", "remote_auth", arguments)
+    # Hookless subagent / session_b call succeeds under session_b without reusing session_a.
     assert invoke("remote_auth", arguments, receipts=receipts)["isError"] is False
     with sqlite3.connect(receipts.path) as db:
-        assert {row[0] for row in db.execute("SELECT session FROM receipts")} == {session_a, session_b}
+        assert [row[0] for row in db.execute("SELECT session FROM receipts ORDER BY started")] == [session_a, session_b]
 
 
-def test_remote_session_environment_is_not_native_authorization(tmp_path, monkeypatch):
+def test_remote_session_environment_is_never_adopted_over_connection_scope(tmp_path, monkeypatch):
     monkeypatch.delenv("AGY_CONVERSATION_ID", raising=False)
-    monkeypatch.setenv("REMOTE_DEV_SESSION_ID", "454c6ee9-afea-47be-8188-abb9c7fb1f26")
-    rejected = invoke("remote_auth", {"host": "auth.example", "port": 22, "action": "status"})
-    assert rejected["isError"] is True
-    assert rejected["structuredContent"]["execution"] == "not_started"
+    forged = "454c6ee9-afea-47be-8188-abb9c7fb1f26"
+    monkeypatch.setenv("REMOTE_DEV_SESSION_ID", forged)
+    receipts = mcp_server.RemoteReceipts(tmp_path / "receipts.sqlite3")
+    res = invoke("remote_auth", {"host": "auth.example", "port": 22, "action": "status"}, receipts=receipts)
+    assert res["isError"] is False
+    with sqlite3.connect(receipts.path) as db:
+        recorded = db.execute("SELECT session FROM receipts").fetchone()[0]
+    assert recorded != forged
+    assert recorded.startswith("agy-mcp-")
 
 
-@pytest.mark.parametrize("surface,name,arguments", [
-    ("remote", "remote_auth", {"host": "auth.example", "port": 22, "action": "status"}),
-    ("tools", "mindie_status", {}),
-])
-def test_admission_failure_does_not_terminate_stdio_server(tmp_path, monkeypatch, surface, name, arguments):
+def test_admission_failure_does_not_terminate_stdio_server(tmp_path, monkeypatch):
     import os
     from paths import remote_receipts_path
 
@@ -96,16 +92,12 @@ def test_admission_failure_does_not_terminate_stdio_server(tmp_path, monkeypatch
     requests = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-            "name": name, "arguments": arguments}},
+            "name": "remote_auth", "arguments": {"host": "auth.example", "port": 22, "action": "status"}}},
         {"jsonrpc": "2.0", "id": 3, "method": "ping"},
         {"jsonrpc": "2.0", "id": 4, "method": "tools/list"},
     ]
-    # AGY reaches the corrupt receipt after a trusted native environment;
-    # WorkBuddy rejects the missing one-shot bind before touching receipts.
-    if surface == "remote":
-        monkeypatch.setenv("AGY_CONVERSATION_ID", "454c6ee9-afea-47be-8188-abb9c7fb1f26")
     completed = subprocess.run(
-        [sys.executable, "-X", "utf8", str(script), surface],
+        [sys.executable, "-X", "utf8", str(script), "remote"],
         input="".join(json.dumps(item) + "\n" for item in requests),
         text=True,
         encoding="utf-8",
@@ -121,4 +113,23 @@ def test_admission_failure_does_not_terminate_stdio_server(tmp_path, monkeypatch
     assert replies[2]["result"]["structuredContent"]["execution"] == "not_started"
     assert replies[3]["result"] == {}
     assert replies[4]["result"]["tools"]
+
+
+def test_duplicate_rpc_frame_is_rejected_even_after_bind_consumption(session, tmp_path):
+    import os
+    from identity import publish_bind
+
+    receipts = mcp_server.RemoteReceipts(tmp_path / "receipts.sqlite3")
+    arguments = {"host": "auth.example", "port": 22, "action": "status"}
+    bound_session = "454c6ee9-afea-47be-8188-abb9c7fb1f26"
+    publish_bind(bound_session, "remote", "remote_auth", arguments)
+    req = {"jsonrpc": "2.0", "id": 77, "method": "tools/call", "params": {"name": "remote_auth", "arguments": arguments}}
+    first = mcp_server.handle_rpc(req, "remote", receipts=receipts)
+    assert first["result"]["isError"] is False
+    publish_bind(bound_session, "remote", "remote_auth", arguments)
+    replay = mcp_server.handle_rpc(req, "remote", receipts=receipts)
+    assert replay["result"]["isError"] is True
+    fresh = mcp_server.handle_rpc({**req, "id": 78}, "remote", receipts=receipts)
+    assert fresh["result"]["isError"] is False
+    assert os.environ["REMOTE_DEV_SESSION_ID"] == bound_session
 
