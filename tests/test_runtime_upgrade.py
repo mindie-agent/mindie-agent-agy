@@ -34,6 +34,7 @@ OLD_TARGETS = {
     "mindie-coordinator": ("coordinator", "14d7cec7247bdcbea9b9878db4770e3a05a6ea41"),
     "mindie-sim": ("sim", "dbadff04b60937a0722b0a227cdad01beed083cd"),
 }
+_PREWARMED_UV_CACHE = os.environ.get("UV_CACHE_DIR")
 
 
 def test_old_runtime_pair_survives_prepare_failure_and_upgrades(tmp_path, monkeypatch, request):
@@ -74,8 +75,11 @@ def test_old_runtime_pair_survives_prepare_failure_and_upgrades(tmp_path, monkey
         "MINDIE_DATA_HOME": data_home, "MINDIE_AGENT_CONFIG": config_home / f"{HOST.lower()}.json",
         "MINDIE_DIAGNOSTICS_ROOT": data_home / "diagnostics",
         "MINDIE_DIAGNOSTICS_CONFIG": config_home / "diagnostics.json",
+        "TMPDIR": tmp_path, "TEMP": tmp_path, "TMP": tmp_path,
     }.items():
         monkeypatch.setenv(name, str(value))
+    if _PREWARMED_UV_CACHE:
+        monkeypatch.setenv("UV_CACHE_DIR", _PREWARMED_UV_CACHE)
     monkeypatch.delenv("MINDIE_AGY_SOURCE_ROOT", raising=False)
     monkeypatch.delenv("MINDIE_WB_SOURCE_ROOT", raising=False)
 

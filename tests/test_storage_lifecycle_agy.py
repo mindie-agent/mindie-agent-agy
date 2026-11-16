@@ -378,15 +378,22 @@ def test_permission_error_rename_leaves_generation_intact_without_backoff(
     before = marker.read_bytes()
 
     class DeniedOs:
+        @staticmethod
+        def _key(value) -> str:
+            raw = os.fspath(value)
+            if os.name == "nt" and raw.startswith("\\\\?\\"):
+                raw = raw[4:]
+            return os.path.normcase(os.path.abspath(raw))
+
         def __init__(self, real, denied):
             self._real = real
-            self._denied = os.path.normcase(os.fspath(denied))
+            self._denied = self._key(denied)
 
         def __getattr__(self, name):
             return getattr(self._real, name)
 
         def replace(self, source, target):
-            if os.path.normcase(os.fspath(source)) == self._denied:
+            if self._key(source) == self._denied:
                 raise PermissionError(13, "generation is in use")
             return self._real.replace(source, target)
 
