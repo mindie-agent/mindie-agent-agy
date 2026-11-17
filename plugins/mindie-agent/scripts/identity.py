@@ -151,11 +151,11 @@ def _connect(path: Path, *, create: bool) -> sqlite3.Connection:
     if not path.exists() and not create:
         raise FileNotFoundError(str(path))
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    db = sqlite3.connect(path, timeout=5.0)
+    db = sqlite3.connect(path, timeout=5.0, isolation_level=None)
     db.execute("PRAGMA busy_timeout=5000;")
     if create:
         db.execute("PRAGMA journal_mode=WAL;")
-        db.execute("PRAGMA synchronous=NORMAL;")
+    db.execute("PRAGMA synchronous=NORMAL;")
     return db
 
 
@@ -201,8 +201,8 @@ def publish_bind(
     now = time.time()
     db = _connect(bind_db_path(config), create=True)
     try:
-        with db:
-            db.execute("BEGIN IMMEDIATE")
+        db.execute("BEGIN IMMEDIATE")
+        try:
             _ensure_binds(db)
             db.execute(
                 "INSERT OR REPLACE INTO binds VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -220,7 +220,11 @@ def publish_bind(
                     now,
                 ),
             )
+            db.execute("COMMIT")
             return bind_id
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
     finally:
         db.close()
 
@@ -243,8 +247,8 @@ def claim_bind(
     cutoff = now - BIND_TTL_SECONDS
     db = _connect(path, create=False)
     try:
-        with db:
-            db.execute("BEGIN IMMEDIATE")
+        db.execute("BEGIN IMMEDIATE")
+        try:
             _ensure_binds(db)
             row = db.execute(
                 "SELECT bind_id, session, workspace_root, transcript_path, step_idx "
@@ -263,6 +267,7 @@ def claim_bind(
                 "UPDATE binds SET status='claimed', updated=? WHERE bind_id=?",
                 (now, bind_id),
             )
+            db.execute("COMMIT")
             return dict(
                 bind_id=bind_id,
                 session=session,
@@ -272,6 +277,9 @@ def claim_bind(
                 surface=surface,
                 local_tool=local_tool,
             )
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
     finally:
         db.close()
 
@@ -285,10 +293,15 @@ def finish_bind(bind_id: str, succeeded: bool, *, config=None) -> None:
         return
     db = _connect(path, create=False)
     try:
-        with db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
             db.execute(
                 "UPDATE binds SET status=?, updated=? WHERE bind_id=? AND status='claimed'",
                 ("succeeded" if succeeded else "failed", time.time(), bind_id),
             )
+            db.execute("COMMIT")
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
     finally:
         db.close()

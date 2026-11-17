@@ -152,23 +152,41 @@ class RemoteReceipts:
 
     def __init__(self, path: Path | None = None):
         self.path = Path(path or remote_receipts_path())
+        self._init_lock = threading.Lock()
+        self._initialized = False
+
+    def _ensure_initialized(self) -> None:
+        if self._initialized and self.path.is_file():
+            return
+        with self._init_lock:
+            if self._initialized and self.path.is_file():
+                return
+            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            init_db = sqlite3.connect(self.path, timeout=5.0)
+            try:
+                init_db.execute("PRAGMA busy_timeout=5000;")
+                init_db.execute("PRAGMA journal_mode=WAL;")
+                init_db.execute("PRAGMA synchronous=NORMAL;")
+                init_db.execute(
+                    "CREATE TABLE IF NOT EXISTS receipts("
+                    "call_id TEXT PRIMARY KEY, "
+                    "session TEXT NOT NULL, "
+                    "tool TEXT NOT NULL, "
+                    "args_sha256 TEXT NOT NULL, "
+                    "status TEXT NOT NULL, "
+                    "started REAL NOT NULL, "
+                    "updated REAL NOT NULL)"
+                )
+                init_db.commit()
+            finally:
+                init_db.close()
+            self._initialized = True
 
     def _connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        db = sqlite3.connect(self.path, timeout=5.0)
+        self._ensure_initialized()
+        db = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
         db.execute("PRAGMA busy_timeout=5000;")
-        db.execute("PRAGMA journal_mode=WAL;")
         db.execute("PRAGMA synchronous=NORMAL;")
-        db.execute(
-            "CREATE TABLE IF NOT EXISTS receipts("
-            "call_id TEXT PRIMARY KEY, "
-            "session TEXT NOT NULL, "
-            "tool TEXT NOT NULL, "
-            "args_sha256 TEXT NOT NULL, "
-            "status TEXT NOT NULL, "
-            "started REAL NOT NULL, "
-            "updated REAL NOT NULL)"
-        )
         return db
 
     def begin(self, call_id: str, session: str, tool: str, args: dict) -> None:
@@ -178,22 +196,31 @@ class RemoteReceipts:
         now = time.time()
         db = self._connect()
         try:
-            with db:
-                db.execute("BEGIN IMMEDIATE")
+            db.execute("BEGIN IMMEDIATE")
+            try:
                 if db.execute("SELECT 1 FROM receipts WHERE call_id=?", (call_id,)).fetchone() is not None:
                     raise ValueError("Duplicate MCP request; replay rejected")
                 db.execute(
                     "INSERT INTO receipts VALUES(?,?,?,?,?,?,?)",
                     (call_id, session, tool, digest, "running", now, now),
                 )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
         finally:
             db.close()
 
     def set_session(self, call_id: str, session: str) -> None:
         db = self._connect()
         try:
-            with db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
                 db.execute("UPDATE receipts SET session=? WHERE call_id=?", (session, call_id))
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
         finally:
             db.close()
 
@@ -201,11 +228,16 @@ class RemoteReceipts:
         now = time.time()
         db = self._connect()
         try:
-            with db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
                 db.execute(
                     "UPDATE receipts SET status=?, updated=? WHERE call_id=?",
                     (status, now, call_id),
                 )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
         finally:
             db.close()
 
@@ -585,7 +617,10 @@ def call_remote_surface(
         from contextlib import nullcontext
         from host_adapter import bind_remote_session
         from remote_dev.core.cancellation import request_context
+        _had_remote_session_env = "REMOTE_DEV_SESSION_ID" in os.environ
         from remote_dev.mcp.server import tool_text
+        if not _had_remote_session_env and os.environ.get("REMOTE_DEV_SESSION_ID", "").startswith("mcp-"):
+            os.environ.pop("REMOTE_DEV_SESSION_ID", None)
         from remote_dev.mcp.tools import call_tool
         from remote_dev.mcp.outcome import operation_outcome
 
