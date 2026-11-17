@@ -1,25 +1,25 @@
 """Session lease admission and factual control-plane status for Antigravity.
 
 [Role]
-Wraps `mindie_knowledge.loop.activation.Admission` for manual-entry session
-lease management (`activate`, `deactivate`, `knowledge_lease`, `status_facts`).
+Wraps `mindie_knowledge.loop.activation.Admission` for default-enabled session
+leases, explicit `/mindie-agent deactivate` muting (`is_deactivated`,
+`ensure_default_lease`, `activate`, `deactivate`, `knowledge_lease`), and
+read-only `status_facts`.
 
 [Invariants]
-- `knowledge_lease(session)` is strictly read-only: it never creates the SQLite
-  file or activates a session, and returns a lease only when `enabled == 1` and
-  `entry_enabled == 1`.
-- `status_facts(session)` returns factual control-plane status without onboarding
-  prompts (`first_use`, `next`, `recovery`) or implicit service activation.
-  Damaged community config yields `community_sharing_enabled=None`, never
-  `False` (disabled). Permission/OS errors on community metadata do not abort
-  status. Corrupt/unreadable sharing files set `repair_required=True`.
+- While the Antigravity plugin is enabled, conversations are active by default
+  unless explicitly muted via `/mindie-agent deactivate` (`enabled == 0`).
+- `knowledge_lease`, `is_deactivated`, and `status_facts` are strictly read-only
+  and never create `admission.sqlite3` or onboard/start background services.
+- Damaged community config yields `community_sharing_enabled=None`, never
+  `False`. Corrupt/unreadable sharing files set `repair_required=True`.
 
 [Timeouts & Locks]
-- Uses `Admission`'s WAL + `5.0s` SQLite busy timeout.
+- Uses `Admission`'s WAL + `5.0s` SQLite busy timeout (`open_database`).
 
 [Side-Effect Policy]
-- `activate` and `deactivate` mutate `admission_path`; `knowledge_lease` and
-  `status_facts` are side-effect free.
+- `activate`, `ensure_default_lease`, and `deactivate` mutate `admission_path`;
+  `knowledge_lease`, `is_deactivated`, and `status_facts` are side-effect free.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from identity import require_session
+from identity import require_session_or_scope
 from paths import (
     admission_path,
     community_config_path,
@@ -45,11 +45,46 @@ def gate(config: str | Path | None = None):
 
 
 def knowledge_lease(session: str, *, config: str | Path | None = None) -> dict | None:
-    session = require_session(session)
+    session = require_session_or_scope(session)
     path = admission_path(config)
     if not path.is_file():
         return None
     return gate(config).knowledge_lease(session)
+
+
+def is_deactivated(session: str, *, config: str | Path | None = None) -> bool:
+    session = require_session_or_scope(session)
+    path = admission_path(config)
+    if not path.is_file():
+        return False
+    info = gate(config).inspect(session)
+    return info.get("status") == "inactive"
+
+
+def ensure_default_lease(
+    session: str,
+    project_root: str | Path | None = None,
+    *,
+    not_before: float | None = 0.0,
+    config: str | Path | None = None,
+) -> dict:
+    session = require_session_or_scope(session)
+    if is_deactivated(session, config=config):
+        raise ValueError(
+            "MindIE knowledge is deactivated for this conversation; send /mindie-agent to re-enable"
+        )
+    existing = knowledge_lease(session, config=config)
+    if existing is not None:
+        return existing
+    root = str(Path(project_root or os.getcwd()).resolve())
+    adm = gate(config)
+    adm.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lease = adm.activate(session, project_root=root, root_session=session, not_before=not_before)
+    return dict(
+        lease,
+        enabled=int(bool(lease.get("enabled", 1))),
+        entry_enabled=int(bool(lease.get("entry_enabled", 1))),
+    )
 
 
 def activate(
@@ -59,7 +94,7 @@ def activate(
     domain: str | None = None,
     config: str | Path | None = None,
 ) -> dict:
-    session = require_session(session)
+    session = require_session_or_scope(session)
     root = str(Path(project_root).resolve())
     if not os.path.isabs(root):
         raise ValueError("project_root must be an absolute path")
@@ -99,8 +134,19 @@ def activate(
     )
 
 
-def deactivate(session: str, *, config: str | Path | None = None) -> dict:
-    session = require_session(session)
+def deactivate(
+    session: str,
+    *,
+    config: str | Path | None = None,
+    project_root: str | Path | None = None,
+) -> dict:
+    session = require_session_or_scope(session)
+    root = str(Path(project_root or os.getcwd()).resolve())
+    adm = gate(config)
+    adm.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if adm.inspect(session).get("status") == "missing":
+        adm.activate(session, project_root=root, root_session=session)
+    adm.deactivate(session)
     cfg_file = config_path(config)
     if cfg_file.is_file():
         adapter = read_json(cfg_file)
@@ -113,10 +159,6 @@ def deactivate(session: str, *, config: str | Path | None = None) -> dict:
                 domain_configs=domain_configs,
                 session=session,
             )
-    path = admission_path(config)
-    if not path.is_file():
-        return dict(status="inactive", session=session)
-    gate(config).deactivate(session)
     return dict(status="inactive", session=session)
 
 
@@ -160,12 +202,17 @@ def _status_facts_body(session: str | None = None, *, config: str | Path | None 
     except OSError:
         configured = False
     lease = None
+    activated = True
+    norm_session = session
     if session is not None:
         try:
-            lease = knowledge_lease(session, config=config)
+            norm_session = require_session_or_scope(session)
+            activated = not is_deactivated(norm_session, config=config)
+            lease = knowledge_lease(norm_session, config=config)
         except TimeoutError:
             raise
         except (ValueError, OSError):
+            activated = False
             lease = None
     consent_state = "unconfigured"
     cpath = consent_path(config)
@@ -184,9 +231,7 @@ def _status_facts_body(session: str | None = None, *, config: str | Path | None 
             raise
         except FileNotFoundError:
             consent_state = "unconfigured"
-        except ValueError:
-            consent_state = "invalid"
-        except OSError:
+        except (ValueError, OSError):
             consent_state = "invalid"
     community_enabled = False
     comm_path = community_config_path(config)
@@ -233,8 +278,8 @@ def _status_facts_body(session: str | None = None, *, config: str | Path | None 
         configured=configured,
         config_path=str(cfg_file),
         engine_config_path=engine_path,
-        activated=bool(lease is not None and lease.get("enabled") == 1),
-        session_id=lease["session"] if lease else session,
+        activated=bool(activated),
+        session_id=lease["session"] if lease else norm_session,
         project_root=lease.get("project_root") if lease else None,
         activated_at=lease.get("activated_at") if lease else None,
         consent_choice=consent_state,

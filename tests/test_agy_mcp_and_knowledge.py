@@ -1,4 +1,4 @@
-"""Tier 0 & Tier 1 tests for MCP discovery separation, private `knowledge_cli`, and Receipt Honesty."""
+"""Tier 0 & Tier 1 tests for default-enabled `mindie-tools` knowledge MCP, `/mindie-agent deactivate`, and Receipt Honesty."""
 
 from __future__ import annotations
 
@@ -10,33 +10,38 @@ import sys
 from pathlib import Path
 import pytest
 
+import admission
 import bridge
 import knowledge_cli
 import mcp_server
+import paths
 
 
 SESSION_A = "454c6ee9-afea-47be-8188-abb9c7fb1f26"
+SESSION_B = "ec33ebf9-0cba-4100-8142-c61503f6c587"
 
 
-def test_public_mcp_excludes_knowledge_even_when_session_is_active(tmp_path: Path):
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    bridge.handle_pre_invocation(
-        {
-            "conversationId": SESSION_A,
-            "workspacePaths": [str(workspace)],
-            "lastUserInput": "/mindie-agent activate session",
-        }
-    )
-
+def test_mcp_tools_exposes_default_enabled_knowledge_and_remote_catalogs(tmp_path: Path):
     remote_resp = mcp_server.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, "remote")
     tools_resp = mcp_server.handle_rpc({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, "tools")
 
-    remote_names = {t["name"] for t in remote_resp["result"]["tools"]}
-    tool_names = {t["name"] for t in tools_resp["result"]["tools"]}
+    remote_tools = remote_resp["result"]["tools"]
+    tools_list = tools_resp["result"]["tools"]
+    remote_names = {t["name"] for t in remote_tools}
+    by_name = {t["name"]: t for t in tools_list}
+    tool_names = set(by_name)
 
     assert "remote_read" in remote_names
     assert "remote_bash" in remote_names
+    assert not any(name.startswith("knowledge_") for name in remote_names)
+
+    expected_knowledge = {
+        "knowledge_query",
+        "knowledge_explain",
+        "knowledge_feedback",
+        "knowledge_distill",
+        "knowledge_sync",
+    }
     assert {
         "mindie_status",
         "profiler",
@@ -46,33 +51,105 @@ def test_public_mcp_excludes_knowledge_even_when_session_is_active(tmp_path: Pat
         "debugger",
         "diagnostics_status",
         "diagnostics_bundle",
-    } <= tool_names
+    } | expected_knowledge <= tool_names
 
-    all_public = remote_names | tool_names
-    for forbidden in ("knowledge_query", "knowledge_explain", "knowledge_feedback", "knowledge_distill", "knowledge_sync"):
-        assert forbidden not in all_public
+    for kname in expected_knowledge:
+        ann = by_name[kname]["annotations"]
+        assert ann["readOnlyHint"] is (kname in {"knowledge_query", "knowledge_explain"})
+        assert ann["destructiveHint"] is False
+        assert ann["openWorldHint"] is (kname == "knowledge_sync")
 
 
-def test_private_knowledge_cli_requires_manual_session_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_default_enabled_knowledge_out_of_the_box_and_deactivate_reenable_lifecycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     workspace = tmp_path / "ws"
     workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.delenv("AGY_CONVERSATION_ID", raising=False)
+
+    # 1. Read-only describe works out-of-the-box without creating admission.sqlite3
+    desc = knowledge_cli.invoke("describe")
+    assert desc["isError"] is False
+    assert not paths.admission_path().exists()
+    assert {t["name"] for t in desc["tools"]} == {
+        "knowledge_query",
+        "knowledge_explain",
+        "knowledge_feedback",
+        "knowledge_distill",
+        "knowledge_sync",
+    }
+
+    # 2. MCP call_tools_surface("knowledge_query", ...) works out-of-the-box with zero /mindie-agent
+    import mindie_knowledge.loop.cli as cli_mod
+    import mindie_knowledge.loop.transport as tr_mod
+
+    seen_rpc: list[tuple[str, dict]] = []
+    monkeypatch.setattr(cli_mod, "ensure_service", lambda cfg_path: {"config_path": cfg_path})
+
+    def fake_rpc(_conn, method, payload, timeout=None):
+        seen_rpc.append((method, dict(payload)))
+        return {"cards": [{"id": "u-1", "title": "A3 HCCL dual-Die rule"}], "total": 1}
+
+    monkeypatch.setattr(tr_mod, "rpc", fake_rpc)
+
+    zero_bind_res = mcp_server.call_tools_surface(
+        "knowledge_query", {"query": "A3 dual-Die HCCL"}, rpc_id=101
+    )
+    assert zero_bind_res["isError"] is False
+    assert zero_bind_res["structuredContent"]["total"] == 1
+    assert seen_rpc[-1][0] == "query"
+    assert seen_rpc[-1][1]["_session_verified"] is True
+
+    # 3. Receipt Honesty on knowledge_* if local RemoteReceipts.finish fails after primary success
+    class BrokenFinishReceipts(mcp_server.RemoteReceipts):
+        def finish(self, call_id: str, status: str) -> None:
+            raise sqlite3.OperationalError("receipt sqlite locked on finish")
+
+    honest_res = mcp_server.call_tools_surface(
+        "knowledge_query",
+        {"query": "aclgraph replay"},
+        rpc_id=102,
+        receipts=BrokenFinishReceipts(),
+    )
+    assert honest_res["isError"] is False
+    assert honest_res["structuredContent"]["receipt_unconfirmed"] is True
+    assert "receipt_warning" in honest_res["structuredContent"]
+
+    # 4. /mindie-agent deactivate mutes SESSION_A while SESSION_B stays active
     monkeypatch.setenv("AGY_CONVERSATION_ID", SESSION_A)
-
-    with pytest.raises(knowledge_cli.KnowledgeInactive):
-        knowledge_cli.invoke("describe")
-
     bridge.handle_pre_invocation(
         {
             "conversationId": SESSION_A,
             "workspacePaths": [str(workspace)],
-            "lastUserInput": "/mindie-agent enable knowledge",
+            "lastUserInput": "/mindie-agent deactivate",
         }
     )
+    assert admission.is_deactivated(SESSION_A) is True
+    assert admission.is_deactivated(SESSION_B) is False
 
-    desc = knowledge_cli.invoke("describe")
-    assert desc["isError"] is False
-    names = {t["name"] for t in desc["tools"]}
-    assert {"knowledge_query", "knowledge_explain", "knowledge_feedback", "knowledge_distill", "knowledge_sync"} <= names
+    muted_res = mcp_server.call_tools_surface("knowledge_query", {"query": "muted"}, rpc_id=103)
+    assert muted_res["isError"] is True
+    assert muted_res["structuredContent"]["code"] == "knowledge_inactive"
+    with pytest.raises(knowledge_cli.KnowledgeInactive):
+        knowledge_cli.invoke("describe")
+
+    monkeypatch.setenv("AGY_CONVERSATION_ID", SESSION_B)
+    other_res = mcp_server.call_tools_surface("knowledge_query", {"query": "active-b"}, rpc_id=104)
+    assert other_res["isError"] is False
+
+    # 5. /mindie-agent re-enables SESSION_A
+    monkeypatch.setenv("AGY_CONVERSATION_ID", SESSION_A)
+    bridge.handle_pre_invocation(
+        {
+            "conversationId": SESSION_A,
+            "workspacePaths": [str(workspace)],
+            "lastUserInput": "/mindie-agent",
+        }
+    )
+    assert admission.is_deactivated(SESSION_A) is False
+    reenabled_res = mcp_server.call_tools_surface("knowledge_query", {"query": "restored"}, rpc_id=105)
+    assert reenabled_res["isError"] is False
 
 
 def test_receipt_honesty_preserves_succeeded_remote_result_on_local_sqlite_error(monkeypatch: pytest.MonkeyPatch):

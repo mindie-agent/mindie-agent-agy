@@ -109,7 +109,7 @@
         "plugins/mindie-agent/scripts/bridge.py:handle_stop"
       ],
       "test_ids": [
-        "tests/test_agy_lifecycle.py::test_stop_never_forces_continuation_and_requires_manual_lease"
+        "tests/test_agy_lifecycle.py::test_stop_never_forces_continuation_and_captures_when_sharing_enabled"
       ],
       "evidence_refs": [
         "docs/harness-interfaces.md"
@@ -128,7 +128,7 @@
         "plugins/mindie-agent/scripts/mcp_server.py:serve"
       ],
       "test_ids": [
-        "tests/test_agy_mcp_and_knowledge.py::test_public_mcp_excludes_knowledge_even_when_session_is_active",
+        "tests/test_agy_mcp_and_knowledge.py::test_mcp_tools_exposes_default_enabled_knowledge_and_remote_catalogs",
         "tests/test_agy_mcp_and_knowledge.py::test_receipt_honesty_preserves_succeeded_remote_result_on_local_sqlite_error"
       ],
       "evidence_refs": [

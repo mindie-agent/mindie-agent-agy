@@ -8,7 +8,7 @@
 
 - **`SessionStart`**：始终返回 `{}`，不启动后台服务，不联网同步。
 - **普通 `PreInvocation`**：当用户输入不包含 `/mindie-agent` 时立即返回 `{}`，零注入、零状态变更。
-- **未激活会话的 `Stop`**：当 `Admission.knowledge_lease(conversationId)` 为 `None` 时立即返回 `{}`，不读取 `mindie-community.json` 或会话 Transcript。
+- **未配置或未开启共享的 `Stop`**：当未配置或未开启社区共享（`sharing_enabled == False`）时在 `< 100ms` 内立即返回 `{}`，不创建 `admission.sqlite3`，不读取会话 Transcript。
 
 ## 2. 跨平台原子读写与 SQLite WAL 纪律
 

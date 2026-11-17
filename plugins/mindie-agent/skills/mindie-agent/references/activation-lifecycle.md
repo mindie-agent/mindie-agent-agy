@@ -1,5 +1,5 @@
 # Activation & Capture Lifecycle in Antigravity
 
-- **Manual Entry Only**: Only an explicit `/mindie-agent` or `$mindie-agent` prompt in `PreInvocation` grants `entry_enabled = 1` in `admission.sqlite3`.
-- **Deactivation**: `/mindie-agent deactivate` revokes the conversation's lease across all registered domains; deterministic tools remain available.
-- **Turn-End `Stop` Capture**: `bridge.py stop` checks `Admission.knowledge_lease(conversationId)`, community sharing consent (`mindie-community.json`), and project scope, then hands off `transcript_full.jsonl` (or `transcript.jsonl`) to `mindie_knowledge.loop.cli.capture_hook` without blocking or forcing model continuation.
+- **Default-Enabled While Plugin Is Active**: Enabling the `mindie-agent` plugin in Antigravity activates `mindie-remote-dev` and `mindie-tools` (including `knowledge_query`, `knowledge_explain`, `knowledge_feedback`, `knowledge_distill`, and `knowledge_sync`) by default without requiring a `/mindie-agent` prefix.
+- **Optional Per-Conversation Mute**: `/mindie-agent deactivate` records an explicit disabled lease (`enabled = 0`) for the current `conversationId` in `admission.sqlite3`, muting `knowledge_*` calls and turn-end `Stop` capture for that conversation while keeping deterministic tools available. Sending `/mindie-agent` re-enables the conversation.
+- **Turn-End `Stop` Capture**: `bridge.py stop` checks `agy.json` and community sharing authority (`mindie-community.json` + project scope) first, skips muted conversations (`is_deactivated`), provisions a default lease (`not_before=0.0`), and hands off `transcript_full.jsonl` (or `transcript.jsonl`) to `mindie_knowledge.loop.cli.capture_hook` without blocking or forcing model continuation (`decision != "continue"`).

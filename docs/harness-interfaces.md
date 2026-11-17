@@ -12,13 +12,13 @@ This document records the 8 controlled Google Antigravity (`agy` `2.0.0 .. 2.99.
 | `hooks.session-start` | Receives `conversationId` and `workspacePaths` on `stdin`; passively returns `{}` | `plugins/mindie-agent/scripts/bridge.py:handle_session_start` | `tests/test_agy_lifecycle.py::test_passive_session_start_and_ordinary_pre_invocation_stay_quiet` |
 | `hooks.pre-invocation` | Receives `lastUserInput` on `stdin`; activates lease on `/mindie-agent` and returns `{"injectSteps": [{"ephemeralMessage": "..."}]}` | `plugins/mindie-agent/scripts/bridge.py:handle_pre_invocation` | `tests/test_agy_lifecycle.py::test_explicit_mindie_agent_gesture_activates_and_deactivates_lease` |
 | `hooks.pre-tool-use` | Receives `toolCall` (`mcp_<server>_<tool>`) and `stepIdx`; records a 30s one-shot bind and returns `{"decision": "allow"}` | `plugins/mindie-agent/scripts/bridge.py:handle_pre_tool_use` | `tests/test_agy_lifecycle.py::test_pre_tool_use_binds_mcp_call_and_rejects_replay` |
-| `hooks.stop` | Receives `transcriptPath`; **always returns `{}`** (`decision != "continue"`), running incremental capture only when both lease and consent are active | `plugins/mindie-agent/scripts/bridge.py:handle_stop` | `tests/test_agy_lifecycle.py::test_stop_never_forces_continuation_and_requires_manual_lease` |
-| `mcp.stdio` | Exposes `mindie-remote-dev` and `mindie-tools` over stdio while excluding all `knowledge_*` tools | `plugins/mindie-agent/scripts/mcp_server.py:serve` | `tests/test_agy_mcp_and_knowledge.py::test_public_mcp_excludes_knowledge_even_when_session_is_active` |
+| `hooks.stop` | Receives `transcriptPath`; **never returns `{"decision": "continue"}`**, running incremental capture when community sharing consent is active and conversation is not muted | `plugins/mindie-agent/scripts/bridge.py:handle_stop` | `tests/test_agy_lifecycle.py::test_stop_never_forces_continuation_and_captures_when_sharing_enabled` |
+| `mcp.stdio` | Exposes `mindie-remote-dev` and `mindie-tools` (including default-enabled `knowledge_*` tools) over concurrent stdio | `plugins/mindie-agent/scripts/mcp_server.py:serve` | `tests/test_agy_mcp_and_knowledge.py::test_mcp_tools_exposes_default_enabled_knowledge_and_remote_catalogs` |
 | `transcript.brain-jsonl` | Parses `<appDataDir>/brain/<conversationId>/.system_generated/logs/transcript_full.jsonl` | `plugins/mindie-agent/scripts/agy_transcript.py:read_material` | `tests/test_agy_transcript.py::test_transcript_extracts_public_messages_and_excludes_thinking_and_metadata` |
 | `summary.structured-output` | Emits `mindie-summary-outcome/1` in an isolated worker and supports `--identity` verification | `plugins/mindie-agent/scripts/organizer.py:main` | `tests/test_agy_organizer.py::test_organizer_emits_valid_summary_outcome_and_never_retries_unknown` |
 
 ## 2. Subagent Session Isolation Boundary
 
-In Google Antigravity, subagents spawned via `invoke_subagent` receive their own distinct UUID `conversationId`. Because `Admission` keys leases strictly by `conversationId`:
-- Typing `/mindie-agent` in the parent conversation authorizes only the parent `conversationId`;
-- Subagents never inherit the parent's knowledge lease or trigger unauthorized `Stop` capture.
+In Google Antigravity, subagents spawned via `invoke_subagent` receive their own distinct UUID `conversationId`. Because `Admission` keys leases and mute records strictly by `conversationId`:
+- Sending `/mindie-agent deactivate` or `/mindie-agent` in one conversation mutates only that `conversationId`;
+- Subagents and sibling conversations keep independent `conversationId` scopes and never share one-shot `PreToolUse` binds or turn-end `Stop` capture cursors.

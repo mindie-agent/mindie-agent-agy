@@ -35,7 +35,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from paths import admission_path, apply_enterprise_transport_env, config_path, data_home, read_json
+from paths import apply_enterprise_transport_env, config_path, data_home, read_json
 
 HOOK_EXEC_BUDGET = 8.0
 HOOK_CLEANUP_GRACE = 2.0
@@ -190,6 +190,16 @@ def _emit_reexec_timeout(argv: list[str], exc: BaseException) -> int:
     return 1
 
 
+def _is_passive_stop() -> bool:
+    cfg = config_path()
+    if not cfg.is_file():
+        return True
+    from setup_sharing import sharing_status
+
+    share = sharing_status(cfg, read_json_fn=read_json)
+    return share.get("sharing_enabled") is False
+
+
 def _reexec(target_py: str, target_script: Path, argv: list[str], env: dict) -> int:
     from bounded import _attach_windows_job, _close_windows_job, _kill_process_tree
 
@@ -261,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
         if (
             argv == ["hook", "stop"]
             and subprocess.Popen is _STDLIB_POPEN
-            and not admission_path().is_file()
+            and _is_passive_stop()
         ):
             from identity import MAX_HOOK_BYTES, parse_hook
 

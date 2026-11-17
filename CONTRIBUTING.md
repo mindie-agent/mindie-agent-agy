@@ -19,7 +19,7 @@ code/
 ## 2. 宿主插件核心契约（不可破坏）
 
 1. **根级 `hooks.json` 字节冻结契约**：`plugins/mindie-agent/hooks.json` 必须保持 `979` 字节且 SHA-256 恒等于 `33b564c78b439205fd4acfe095c83b15770043ff462d636e2a89f14620cdfc3f`。
-2. **被动默认与 `< 100ms` `Stop` 快速路径（`P2.1` / `P2.2`）**：未显式调用 `/mindie-agent` 的会话在 `Stop` 阶段必须在 `100ms` 内返回 `{}`，零网络、零构建、零转录扫描；默认 MCP `tools/list` 严禁暴露 `knowledge_*` 工具。
+2. **插件启用默认全量可用与 `< 100ms` 未开启共享 `Stop` 快速路径**：启用插件即默认开放 `mindie-remote-dev` 与 `mindie-tools`（含 `knowledge_*` 工具；`/mindie-agent deactivate` 可按会话静音）；未配置或未开启社区共享时 `Stop` 必须在 `100ms` 内返回 `{}`，零网络、零建库、零转录扫描。
 3. **确定性工具零预绑定门禁（`P2.7`）**：`mindie-remote-dev` 与 `mindie-tools` 在无 `_meta`、无 `PreToolUse` 绑定、无 `AGY_CONVERSATION_ID` 时必须通过标准 MCP `tools/call` 正常执行。
 4. **Windows 零弹窗与 Unix LF**：所有 Windows 子进程调用必须携带 `CREATE_NO_WINDOW`（严禁 `DETACHED_PROCESS` 或 `CREATE_NEW_CONSOLE`），全仓文本文件统一使用 Unix `LF`（`\n`）换行。
 

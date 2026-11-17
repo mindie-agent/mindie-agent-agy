@@ -21,6 +21,8 @@ SESSION_B = "ec33ebf9-0cba-4100-8142-c61503f6c587"
 
 
 def test_passive_session_start_and_ordinary_pre_invocation_stay_quiet(tmp_path: Path):
+    import paths
+
     workspace = tmp_path / "ws"
     workspace.mkdir()
     start_out = bridge.handle_session_start(
@@ -30,6 +32,7 @@ def test_passive_session_start_and_ordinary_pre_invocation_stay_quiet(tmp_path: 
         }
     )
     assert start_out == {}
+    assert not paths.admission_path().exists()
     assert admission.knowledge_lease(SESSION_A) is None
 
     pre_out = bridge.handle_pre_invocation(
@@ -41,56 +44,80 @@ def test_passive_session_start_and_ordinary_pre_invocation_stay_quiet(tmp_path: 
         }
     )
     assert pre_out == {}
-    assert admission.knowledge_lease(SESSION_A) is None
+    assert not paths.admission_path().exists()
+    facts = admission.status_facts(SESSION_A)
+    assert facts["activated"] is True
+    assert not paths.admission_path().exists()
 
 
 def test_explicit_mindie_agent_gesture_activates_and_deactivates_lease(tmp_path: Path):
     workspace = tmp_path / "ws"
     workspace.mkdir()
 
+    # Deactivating a fresh conversation mutes SESSION_A without affecting SESSION_B
+    deact_first = bridge.handle_pre_invocation(
+        {
+            "conversationId": SESSION_A,
+            "workspacePaths": [str(workspace)],
+            "lastUserInput": "/mindie-agent deactivate",
+            "invocationNum": 1,
+        }
+    )
+    assert "deactivated" in deact_first["injectSteps"][0]["ephemeralMessage"]
+    assert admission.is_deactivated(SESSION_A) is True
+    assert admission.status_facts(SESSION_A)["activated"] is False
+    assert admission.is_deactivated(SESSION_B) is False
+    assert admission.status_facts(SESSION_B)["activated"] is True
+
+    # Sending /mindie-agent re-enables SESSION_A and points to mindie-tools MCP
     out = bridge.handle_pre_invocation(
         {
             "conversationId": SESSION_A,
             "workspacePaths": [str(workspace)],
             "lastUserInput": "/mindie-agent 排查 A3 双 Die HCCL 通信超时",
-            "invocationNum": 1,
+            "invocationNum": 2,
         }
     )
     assert "injectSteps" in out
-    assert SESSION_A in out["injectSteps"][0]["ephemeralMessage"]
+    msg = out["injectSteps"][0]["ephemeralMessage"]
+    assert SESSION_A in msg
+    assert "mindie-tools" in msg
 
     lease = admission.knowledge_lease(SESSION_A)
     assert lease is not None
     assert lease["enabled"] == 1
     assert lease["entry_enabled"] == 1
     assert Path(lease["project_root"]) == workspace.resolve()
+    assert admission.is_deactivated(SESSION_A) is False
+    assert admission.status_facts(SESSION_A)["activated"] is True
 
-    # Another conversation (or subagent conversation) never inherits SESSION_A's lease
+    # Another conversation (or subagent conversation) keeps independent lease state
     assert admission.knowledge_lease(SESSION_B) is None
 
-    # Subsequent ordinary prompt in SESSION_A keeps the lease active
+    # Subsequent ordinary prompt in SESSION_A stays zero-I/O and preserves lease
     follow_up = bridge.handle_pre_invocation(
         {
             "conversationId": SESSION_A,
             "workspacePaths": [str(workspace)],
             "lastUserInput": "Show the HCCL ranktable",
-            "invocationNum": 2,
+            "invocationNum": 3,
         }
     )
     assert follow_up == {}
     assert admission.knowledge_lease(SESSION_A) is not None
 
-    # Explicit deactivation revokes the lease
+    # Explicit deactivation mutes SESSION_A again
     deact = bridge.handle_pre_invocation(
         {
             "conversationId": SESSION_A,
             "workspacePaths": [str(workspace)],
             "lastUserInput": "/mindie-agent deactivate",
-            "invocationNum": 3,
+            "invocationNum": 4,
         }
     )
     assert "deactivated" in deact["injectSteps"][0]["ephemeralMessage"]
     assert admission.knowledge_lease(SESSION_A) is None
+    assert admission.is_deactivated(SESSION_A) is True
 
 
 def test_pre_tool_use_binds_mcp_call_and_rejects_replay(tmp_path: Path):
@@ -142,7 +169,11 @@ def test_pre_tool_use_binds_mcp_call_and_rejects_replay(tmp_path: Path):
     identity.finish_bind(claimed_lazy["bind_id"], True)
 
 
-def test_stop_never_forces_continuation_and_requires_manual_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_stop_never_forces_continuation_and_captures_when_sharing_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import paths
+
     workspace = tmp_path / "ws"
     workspace.mkdir()
     brain_logs = tmp_path / "gemini" / "antigravity" / "brain" / SESSION_A / ".system_generated" / "logs"
@@ -156,14 +187,15 @@ def test_stop_never_forces_continuation_and_requires_manual_lease(tmp_path: Path
                 "type": "USER_INPUT",
                 "status": "DONE",
                 "created_at": "2026-10-31T08:21:33Z",
-                "content": "<USER_REQUEST>\n/mindie-agent test\n</USER_REQUEST>",
+                "content": "<USER_REQUEST>\nVerify custom Ascend operator\n</USER_REQUEST>",
             }
         )
         + "\n",
         encoding="utf-8",
     )
 
-    # Unactivated Stop returns {} immediately and never forces continuation
+    # 1. Cold unconfigured Stop returns {} in < 100ms without creating admission.sqlite3
+    t0 = time.perf_counter()
     passive_stop = bridge.handle_stop(
         {
             "conversationId": SESSION_A,
@@ -173,17 +205,28 @@ def test_stop_never_forces_continuation_and_requires_manual_lease(tmp_path: Path
             "terminationReason": "NO_TOOL_CALL",
         }
     )
+    assert (time.perf_counter() - t0) * 1000.0 < 100.0
     assert passive_stop == {}
     assert passive_stop.get("decision") != "continue"
+    assert not paths.admission_path().exists()
 
-    # Activate session and enable community sharing for workspace
-    bridge.handle_pre_invocation(
+    # 2. Sharing-disabled Stop also returns {} in < 100ms without creating admission.sqlite3
+    setup.configure_community(enabled=False, project_root=workspace)
+    t1 = time.perf_counter()
+    disabled_stop = bridge.handle_stop(
         {
             "conversationId": SESSION_A,
             "workspacePaths": [str(workspace)],
-            "lastUserInput": "/mindie-agent test",
+            "transcriptPath": str(transcript),
+            "executionNum": 1,
+            "terminationReason": "NO_TOOL_CALL",
         }
     )
+    assert (time.perf_counter() - t1) * 1000.0 < 100.0
+    assert disabled_stop == {}
+    assert not paths.admission_path().exists()
+
+    # 3. Enable community sharing: default-active conversation captures cleanly WITHOUT /mindie-agent!
     setup.configure_community(enabled=True, fork="user/knowledge-vllm-ascend", project_root=workspace)
 
     captured_calls = []
@@ -211,7 +254,47 @@ def test_stop_never_forces_continuation_and_requires_manual_lease(tmp_path: Path
     _, forwarded = captured_calls[0]
     assert forwarded["harness"] == "agy"
     assert forwarded["session_id"] == SESSION_A
+    assert forwarded["mindie_activation"]
     assert forwarded["transcript_path"] == str(transcript.resolve())
+
+    # 4. /mindie-agent deactivate mutes Stop capture for SESSION_A, and /mindie-agent re-enables it
+    bridge.handle_pre_invocation(
+        {
+            "conversationId": SESSION_A,
+            "workspacePaths": [str(workspace)],
+            "lastUserInput": "/mindie-agent deactivate",
+        }
+    )
+    muted_stop = bridge.handle_stop(
+        {
+            "conversationId": SESSION_A,
+            "workspacePaths": [str(workspace)],
+            "transcriptPath": str(transcript),
+            "executionNum": 3,
+            "terminationReason": "NO_TOOL_CALL",
+        }
+    )
+    assert muted_stop == {}
+    assert len(captured_calls) == 1
+
+    bridge.handle_pre_invocation(
+        {
+            "conversationId": SESSION_A,
+            "workspacePaths": [str(workspace)],
+            "lastUserInput": "/mindie-agent",
+        }
+    )
+    restored_stop = bridge.handle_stop(
+        {
+            "conversationId": SESSION_A,
+            "workspacePaths": [str(workspace)],
+            "transcriptPath": str(transcript),
+            "executionNum": 4,
+            "terminationReason": "NO_TOOL_CALL",
+        }
+    )
+    assert restored_stop == {}
+    assert len(captured_calls) == 2
 
 
 def test_pre_tool_use_bind_failure_denies_with_host_readable_stdout(tmp_path: Path, monkeypatch, capsys):

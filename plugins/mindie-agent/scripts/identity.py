@@ -38,6 +38,7 @@ from paths import bind_db_path
 SESSION_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
 )
+FALLBACK_SESSION_RE = re.compile(r"^(?:agy-cli-default|agy-mcp-[A-Za-z0-9_.:-]{1,96})\Z")
 GESTURE_RE = re.compile(r"^\s*(?:/mindie-agent|\$mindie-agent(?::mindie-agent)?)(?=\s|$)")
 MCP_EAGER_RE = re.compile(
     r"^mcp_(?:mindie[-_]agent[-_])?(mindie[-_]remote[-_]dev|mindie[-_]tools)_([A-Za-z0-9_.]+)\Z"
@@ -61,6 +62,23 @@ def require_session(value) -> str:
     if not isinstance(value, str) or not SESSION_RE.fullmatch(value.strip()):
         raise ValueError("native Antigravity conversationId is missing or invalid")
     return value.strip().lower()
+
+
+def require_session_or_scope(value) -> str:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if FALLBACK_SESSION_RE.fullmatch(stripped):
+            return stripped
+        mcp_conn = os.environ.get("MINDIE_MCP_CONNECTION_ID")
+        if (
+            isinstance(mcp_conn, str)
+            and mcp_conn.strip()
+            and stripped == mcp_conn.strip()
+            and len(stripped) <= 128
+            and not any(ch.isspace() for ch in stripped)
+        ):
+            return stripped
+    return require_session(value)
 
 
 def session_from_hook(event: dict) -> str:

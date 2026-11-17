@@ -14,4 +14,5 @@
 | [故障诊断、超时算术与回执诚实性](failure-diagnostics.zh.md) | [Failure Diagnostics & Receipt Honesty](failure-diagnostics.md) | `660s >= 600s + 60s` 超时算术、`receipt_unconfirmed` 远端回执保护、`outcome_unknown` 防重放与有界进程树回收 |
 | [框架稳定性与持久化配置](framework-stability.zh.md) | [Framework Stability](framework-stability.md) | 被动默认静默保障、跨平台原子文件替换与配置隔离 |
 | [测试边界与契约校验](testing-contracts.zh.md) | [Test Boundaries & Contracts](testing-contracts.md) | Tier-0 契约测试矩阵、`harness-compatibility.json` 映射校验与 LF 格式门禁 |
-| [Release v0.1.0 发布说明](releases/mindie-agent-agy-0.1.0.md) | [Release v0.1.0 Notes](releases/mindie-agent-agy-0.1.0.en.md) | `v0.1.0` 首发特性、支持接口与组件锁定版本说明 |
+| [工作区配置指南](install/workspace-setup.md) / [GitHub 认证](install/github-authentication.md) / [用户须知](install/user-notice.md) | [Workspace Setup](install/workspace-setup.md) / [GitHub Sign-In](install/github-authentication.md) / [User Notice](install/user-notice.md) | 首次安装阶段工作区引导、`gh` 认证配置与社区共享/脱敏数据边界说明（已从运行时 `skills/` 彻底剥离） |
+| [Release v0.1.19 发布说明](releases/mindie-agent-agy-0.1.19.md) | [Release v0.1.19 Notes](releases/mindie-agent-agy-0.1.19.en.md) | `v0.1.19` 默认开放全量能力与纯运行时 `SKILL.md` 边界收敛说明 |

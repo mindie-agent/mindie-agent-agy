@@ -10,8 +10,8 @@ and `verify_seed_bundle()` for streaming `64 KiB` SHA-256 verification of the bu
 - Pure Python stdlib at module import time (`< 15ms`, zero device context, zero network).
 - `extract_session_identity` extracts verified Antigravity session IDs from `_meta` or
   `AGY_CONVERSATION_ID` only—never from model-supplied tool `arguments` (`P2.7`).
-- `mcp_tools` exposes only deterministic `remote` and `tools` surfaces and never leaks
-  `knowledge_*` tools onto public MCP discovery (`P2.1`).
+- `mcp_tools` exposes the full Antigravity `remote` and `tools` surfaces (including
+  default-enabled `knowledge_*` tools on `mindie-tools`).
 
 [Timeouts & Locks]
 - Seed verification streams `64 KiB` chunks in `< 5ms` with zero locks; runtime execution
@@ -156,7 +156,13 @@ def write_wire_frame(stream: BinaryIO, payload: dict[str, Any], framing: str) ->
 
 def is_fast_lane_tool(surface: str, name: str, arguments: Mapping[str, Any]) -> bool:
     if surface == "tools":
-        return name in {"mindie_status", "diagnostics_status", "npu_top"}
+        return name in {
+            "mindie_status",
+            "diagnostics_status",
+            "npu_top",
+            "knowledge_query",
+            "knowledge_explain",
+        }
     lowered = name.lower()
     if lowered == "remote_auth":
         return arguments.get("action") == "status"

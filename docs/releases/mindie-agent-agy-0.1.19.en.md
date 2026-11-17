@@ -1,0 +1,6 @@
+# mindie-agent-agy 0.1.19: Default-Enabled Full Plugin Capabilities (`mindie-tools` Knowledge MCP) and Pure-Runtime `SKILL.md` Boundary
+
+[中文](mindie-agent-agy-0.1.19.md)
+
+- **Default-Enabled Capabilities When Plugin Is Active**: Because Google Antigravity toggles plugins as an atomic bundle and auto-routes `SKILL.md` semantically, `mindie-tools` now exposes and serves `knowledge_query`, `knowledge_explain`, `knowledge_feedback`, `knowledge_distill`, and `knowledge_sync` out of the box without requiring a `/mindie-agent` prefix, and opt-in `Stop` capture runs automatically for in-scope conversations when community sharing is enabled (`/mindie-agent deactivate` optionally mutes a conversation and `/mindie-agent` re-enables it), while unconfigured or sharing-disabled `Stop` keeps its stdlib `< 100ms` fast path without creating `admission.sqlite3`.
+- **Installer Docs Moved to `docs/install/` & Pure-Runtime `SKILL.md`**: Relocates `workspace-setup.md`, `github-authentication.md`, and `user-notice.md` out of `plugins/mindie-agent/skills/` into `docs/install/`, rewrites `SKILL.md` (`< 35` lines) strictly for runtime engineering workflows with zero installation/onboarding/GitHub-Star instructions, and preserves the frozen `plugins/mindie-agent/hooks.json` SHA-256 digest byte-for-byte.

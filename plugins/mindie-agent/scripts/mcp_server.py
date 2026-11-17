@@ -1,30 +1,29 @@
 """Public stdio JSON-RPC 2.0 MCP server for Antigravity (`remote` and `tools` surfaces).
 
 [Role]
-Serves public MCP discovery (`tools/list`) and tool execution (`tools/call`) for
-`mindie-remote-dev` and `mindie-tools` (profiler/sim/coordinator/diagnostics/npu_top).
+Serves MCP discovery (`tools/list`) and tool execution (`tools/call`) for
+`mindie-remote-dev` and `mindie-tools` (profiler/sim/coordinator/debugger/npu_top/
+diagnostics/mindie_status + default-enabled `knowledge_*` tools).
 
 [Invariants]
-- Default MCP discovery (`tools/list`) NEVER exposes `knowledge_*` tool names,
-  descriptions, or schemas—even if a session has activated `/mindie-agent`.
-- Deterministic tools (`remote_*`, `profiler`, `sim`, `coordinator`,
-  `diagnostics_*`, `mindie_status`) work over standard MCP `tools/call` with
-  zero pre-call session binding or knowledge lease (`PreToolUse` binds and
+- While the Antigravity plugin is enabled, `mindie-tools` exposes both deterministic
+  component tools and `knowledge_*` tools (`knowledge_query`, `knowledge_explain`,
+  `knowledge_feedback`, `knowledge_distill`, `knowledge_sync`); conversations muted
+  via `/mindie-agent deactivate` reject `knowledge_*` calls with `isError=True`.
+- All `mindie-remote-dev` and `mindie-tools` operations work over standard MCP
+  `tools/call` with zero pre-call session binding (`PreToolUse` binds and
   `AGY_CONVERSATION_ID` are opportunistic hints, falling back to `_CONNECTION_SESSION_ID`).
-- Receipt Honesty: once a remote/component operation succeeds, a local SQLite
-  `finish`/`finish_bind` `OSError` or `sqlite3.Error` keeps `isError=False` and
-  attaches `receipt_warning` + `receipt_unconfirmed=True` so the caller never
-  blindly repeats a completed mutation.
+- Receipt Honesty: once a primary remote/component/knowledge operation succeeds,
+  a local SQLite `finish`/`finish_bind` `OSError` or `sqlite3.Error` keeps
+  `isError=False` and attaches `receipt_warning` + `receipt_unconfirmed=True`.
 - Non-empty UTF-8/JSON parse failures return JSON-RPC `-32700` Parse error.
   Parsed non-object frames return `-32600` Invalid Request (never dropped).
 - Background updater spawn failure never aborts `tools/call` or the stdio loop.
 - The resident stdio server holds a shared `acquire_runtime_lease` on the
-  managed generation owning `sys.executable`; a missing/read-only generation
-  degrades to no lease and never blocks startup.
+  managed generation owning `sys.executable`.
 
 [Timeouts & Locks]
-- SQLite WAL mode with `busy_timeout=5000` (`timeout=5.0`) for `RemoteReceipts`
-  (`remote-receipts.sqlite3`); the generation lease is one non-blocking OS lock.
+- SQLite WAL mode with `busy_timeout=5000` (`timeout=5.0`) for `RemoteReceipts`.
 - Enforces `remote_timeout(name, args) = max(minimum, inner_wait + 60.0s grace)`.
 
 [Side-Effect Policy]
@@ -57,6 +56,8 @@ from admission import status_facts
 from bounded import run as bounded_run
 from component_update import trigger_background_update_if_due
 from identity import claim_bind, finish_bind, require_session
+import knowledge_cli
+from knowledge_cli import KNOWLEDGE_NAMES, KNOWLEDGE_TOOL_SCHEMAS
 from paths import bind_db_path, config_path, diagnostics_config_path, read_json, remote_receipts_path, state_dir, which_native
 
 REMOTE_GRACE_SECONDS = 60.0
@@ -243,86 +244,68 @@ class RemoteReceipts:
 
 
 def tools_catalog() -> list[dict]:
-    """Return the deterministic `mindie-tools` MCP catalog (zero knowledge tools)."""
+    """Return the `mindie-tools` MCP catalog (deterministic tools + default-enabled `knowledge_*`)."""
     limits = {
-        "timeout_ms": dict(
-            type="integer",
-            minimum=1,
-            maximum=300000,
-            default=120000,
-            description="Execution deadline in milliseconds; includes inner budgets and cleanup grace.",
-        ),
-        "max_output_tokens": dict(
-            type="integer",
-            minimum=1,
-            maximum=262144,
-            default=16384,
-            description="Output byte budget divided by four.",
-        ),
+        "timeout_ms": dict(type="integer", minimum=1, maximum=300000, default=120000,
+                           description="Execution deadline in milliseconds; includes inner budgets and cleanup grace."),
+        "max_output_tokens": dict(type="integer", minimum=1, maximum=262144, default=16384,
+                                  description="Output byte budget divided by four."),
     }
     items: list[dict] = [
         dict(
             name="mindie_status",
             description=(
                 "Read factual MindIE control-plane status for the current Antigravity session. "
-                "Does not activate a knowledge lease, start background services, or emit onboarding prompts."
+                "Does not start background services or emit onboarding prompts."
             ),
             inputSchema=dict(type="object", properties={}, additionalProperties=False),
             annotations=dict(readOnlyHint=True, destructiveHint=False, openWorldHint=False),
         )
     ]
     for name, description in COMPONENT_DESCRIPTIONS.items():
-        items.append(
-            dict(
-                name=name,
-                description=description,
-                inputSchema=dict(
-                    type="object",
-                    additionalProperties=False,
-                    required=["argv"],
-                    properties=dict(
-                        argv=dict(
-                            type="array",
-                            items=dict(type="string"),
-                            description="CLI arguments array; passed without shell expansion.",
-                        ),
-                        **limits,
-                    ),
-                ),
-                annotations=dict(readOnlyHint=False, destructiveHint=True, openWorldHint=True),
-            )
-        )
-    items.append(
-        dict(
-            name="diagnostics_status",
-            description="Inspect local MindIE diagnostic/reporting status without starting a worker or contacting GitHub.",
+        items.append(dict(
+            name=name,
+            description=description,
             inputSchema=dict(
                 type="object",
                 additionalProperties=False,
-                properties=dict(config=dict(type="string"), **limits),
-            ),
-            annotations=dict(readOnlyHint=True, destructiveHint=False, openWorldHint=False),
-        )
-    )
-    items.append(
-        dict(
-            name="diagnostics_bundle",
-            description="Export a bounded, sanitized local diagnostic support bundle without uploading it.",
-            inputSchema=dict(
-                type="object",
-                additionalProperties=False,
-                required=[],
+                required=["argv"],
                 properties=dict(
-                    root=dict(type="string"),
-                    operation_id=dict(type="string"),
-                    incident_id=dict(type="string"),
-                    output=dict(type="string"),
+                    argv=dict(type="array", items=dict(type="string"),
+                              description="CLI arguments array; passed without shell expansion."),
                     **limits,
                 ),
             ),
-            annotations=dict(readOnlyHint=False, destructiveHint=False, openWorldHint=False),
-        )
-    )
+            annotations=dict(readOnlyHint=False, destructiveHint=True, openWorldHint=True),
+        ))
+    items.append(dict(
+        name="diagnostics_status",
+        description="Inspect local MindIE diagnostic/reporting status without starting a worker or contacting GitHub.",
+        inputSchema=dict(type="object", additionalProperties=False, properties=dict(config=dict(type="string"), **limits)),
+        annotations=dict(readOnlyHint=True, destructiveHint=False, openWorldHint=False),
+    ))
+    items.append(dict(
+        name="diagnostics_bundle",
+        description="Export a bounded, sanitized local diagnostic support bundle without uploading it.",
+        inputSchema=dict(
+            type="object",
+            additionalProperties=False,
+            required=[],
+            properties=dict(root=dict(type="string"), operation_id=dict(type="string"),
+                            incident_id=dict(type="string"), output=dict(type="string"), **limits),
+        ),
+        annotations=dict(readOnlyHint=False, destructiveHint=False, openWorldHint=False),
+    ))
+    for schema in KNOWLEDGE_TOOL_SCHEMAS:
+        kname = schema["name"]
+        items.append(dict(
+            **schema,
+            annotations=dict(
+                readOnlyHint=kname in {"knowledge_query", "knowledge_explain"},
+                destructiveHint=False,
+                openWorldHint=(kname == "knowledge_sync"),
+            ),
+        ))
     return items
 
 
@@ -462,6 +445,12 @@ def call_tools_surface(
                 structuredContent=facts,
                 isError=False,
             )
+        elif name in KNOWLEDGE_NAMES:
+            try:
+                result = knowledge_cli.invoke(name, args, session=session, config=config)
+            except Exception as exc:
+                result = knowledge_cli._format_failure(exc)
+            succeeded = not bool(result.get("isError"))
         elif name in COMPONENT_DESCRIPTIONS or name in {"diagnostics_status", "diagnostics_bundle"}:
             if name in COMPONENT_DESCRIPTIONS:
                 component = name
