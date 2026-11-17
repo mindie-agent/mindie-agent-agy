@@ -486,7 +486,6 @@ def test_resident_mcp_serve_holds_the_generation_lease(
 def test_resident_mcp_front_end_leases_before_dispatch(
         upgrade_env, monkeypatch: pytest.MonkeyPatch):
     import mcp_server
-    import remote_dev.mcp.catalog_refresh as refresh
     import storage_lifecycle
     from mindie_knowledge.storage import is_lease_held
     from mindie_knowledge.storage.leases import windows_lease_present
@@ -494,13 +493,13 @@ def test_resident_mcp_front_end_leases_before_dispatch(
     generation = _make_generation(upgrade_env["runtimes"], "gen-front", mtime=time.time() - 7200)
     seen: list[bool] = []
 
-    def fake_serve_selected(select, **_kwargs):
+    def fake_serve(surface, **_kwargs):
         seen.append(is_lease_held(generation) or windows_lease_present(generation))
         return 0
 
     monkeypatch.setattr(storage_lifecycle, "runtime_generation",
                         lambda executable=None: generation)
-    monkeypatch.setattr(refresh, "serve_selected", fake_serve_selected)
+    monkeypatch.setattr(mcp_server, "serve", fake_serve)
     assert mcp_server.main(["tools"]) == 0
     assert seen == [True]
 

@@ -20,6 +20,52 @@ jobs:
       - name: Run LF line-ending check
         run: python3 .github/scripts/check_lf_eol.py
 
+  smoke:
+    name: Out-of-Tree Staged Plugin Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Stage plugin outside checkout and verify cold contracts
+        run: |
+          SMOKE_ROOT="$(mktemp -d)"
+          trap 'rm -rf "$SMOKE_ROOT"' EXIT
+          mkdir -p "$SMOKE_ROOT/home" "$SMOKE_ROOT/cfg" "$SMOKE_ROOT/data" "$SMOKE_ROOT/diag" "$SMOKE_ROOT/plugin"
+          cp -R plugins product-contract.json harness-compatibility.json pyproject.toml "$SMOKE_ROOT/plugin/"
+          cd "$SMOKE_ROOT/home"
+          HOME="$SMOKE_ROOT/home" \
+          MINDIE_CONFIG_HOME="$SMOKE_ROOT/cfg" \
+          MINDIE_DATA_HOME="$SMOKE_ROOT/data" \
+          MINDIE_DIAGNOSTICS_ROOT="$SMOKE_ROOT/diag" \
+          python3 -I "$SMOKE_ROOT/plugin/plugins/mindie-agent/scripts/host_adapter.py" --help >/dev/null 2>&1 || true
+          HOME="$SMOKE_ROOT/home" \
+          MINDIE_CONFIG_HOME="$SMOKE_ROOT/cfg" \
+          MINDIE_DATA_HOME="$SMOKE_ROOT/data" \
+          MINDIE_DIAGNOSTICS_ROOT="$SMOKE_ROOT/diag" \
+          python3 -I - "$SMOKE_ROOT/plugin/plugins/mindie-agent" <<'PY'
+          import hashlib, json, subprocess, sys, time
+          from pathlib import Path
+          plugin_dir = Path(sys.argv[1])
+          hooks = (plugin_dir / "hooks.json").read_bytes()
+          assert len(hooks) == 979
+          assert hashlib.sha256(hooks).hexdigest() == "33b564c78b439205fd4acfe095c83b15770043ff462d636e2a89f14620cdfc3f"
+          sys.path.insert(0, str(plugin_dir / "scripts"))
+          import host_adapter
+          lock = host_adapter.verify_seed_bundle(plugin_dir)
+          assert lock["schema"] == "mindie-harness-seed/1"
+          t0 = time.monotonic()
+          proc = subprocess.run(
+              [sys.executable, "-I", str(plugin_dir / "scripts" / "mindie_launch.py"), "hook", "stop"],
+              input='{"conversationId":"454c6ee9-afea-47be-8188-abb9c7fb1f26"}',
+              text=True, capture_output=True, timeout=5, check=True,
+          )
+          elapsed_ms = (time.monotonic() - t0) * 1000.0
+          assert json.loads(proc.stdout) == {}
+          assert elapsed_ms < 500.0
+          PY
+
   continuity:
     uses: ./.github/workflows/task-continuity.yml
 
@@ -28,9 +74,10 @@ jobs:
 
   release-ready:
     name: release-ready
-    needs: [lf-gate, continuity, upgrade]
+    needs: [lf-gate, smoke, continuity, upgrade]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - env:
           RESULTS: ${{ toJSON(needs) }}

@@ -34,6 +34,7 @@ Serves public MCP discovery (`tools/list`) and tool execution (`tools/call`) for
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import math
@@ -43,7 +44,9 @@ import shutil
 import sqlite3
 import sys
 import sysconfig
+import threading
 import time
+from typing import BinaryIO
 import uuid
 
 HERE = Path(__file__).resolve().parent
@@ -54,7 +57,7 @@ from admission import status_facts
 from bounded import run as bounded_run
 from component_update import trigger_background_update_if_due
 from identity import claim_bind, finish_bind, require_session
-from paths import bind_db_path, config_path, diagnostics_config_path, read_json, remote_receipts_path, which_native
+from paths import bind_db_path, config_path, diagnostics_config_path, read_json, remote_receipts_path, state_dir, which_native
 
 REMOTE_GRACE_SECONDS = 60.0
 REMOTE_MIN_BUDGET_SECONDS = 180.0
@@ -390,6 +393,7 @@ def call_tools_surface(
     rpc_id=None,
     config=None,
     receipts: RemoteReceipts | None = None,
+    cancel: threading.Event | None = None,
 ) -> dict:
     args = dict(arguments or {})
     receipt_store = receipts if receipts is not None or rpc_id is not None else None
@@ -469,6 +473,7 @@ def call_tools_surface(
                 timeout=timeout_ms / 1000.0,
                 max_output=COMPONENT_CAPTURE_LIMIT_BYTES,
                 env=child_env,
+                cancel=cancel,
             )
             reply_limit = budget * 4
             stdout_bytes = proc.stdout.encode("utf-8", errors="replace")
@@ -548,6 +553,7 @@ def call_remote_surface(
     rpc_id=None,
     config=None,
     receipts: RemoteReceipts | None = None,
+    cancel: threading.Event | None = None,
 ) -> dict:
     args = dict(arguments or {})
     reserved = False
@@ -570,15 +576,22 @@ def call_remote_surface(
         return _admission_failure(exc)
 
     os.environ.setdefault("MINDIE_DIAGNOSTICS_CONFIG", str(diagnostics_config_path(config)))
-    os.environ["REMOTE_DEV_SESSION_ID"] = session
+    explicit_remote = os.environ.get("REMOTE_DEV_STATE_DIR")
+    remote_root = Path(explicit_remote) if explicit_remote else (state_dir(config) / "remote")
+    remote_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     succeeded = False
     outcome = "failed"
     try:
+        from contextlib import nullcontext
+        from host_adapter import bind_remote_session
+        from remote_dev.core.cancellation import request_context
         from remote_dev.mcp.server import tool_text
         from remote_dev.mcp.tools import call_tool
         from remote_dev.mcp.outcome import operation_outcome
 
-        raw = call_tool(name, args, profile="canonical")
+        ctx_mgr = request_context(cancel) if cancel is not None else nullcontext()
+        with bind_remote_session(session, state_root_dir=remote_root), ctx_mgr:
+            raw = call_tool(name, args, profile="canonical")
         outcome = operation_outcome(name, raw)
         is_error = outcome != "succeeded"
         succeeded = not is_error
@@ -625,7 +638,14 @@ def call_remote_surface(
     return result
 
 
-def handle_rpc(request: dict, surface: str, *, config=None, receipts: RemoteReceipts | None = None) -> dict | None:
+def handle_rpc(
+    request: dict,
+    surface: str,
+    *,
+    config=None,
+    receipts: RemoteReceipts | None = None,
+    cancel: threading.Event | None = None,
+) -> dict | None:
     if not isinstance(request, dict):
         return dict(
             jsonrpc="2.0",
@@ -646,7 +666,7 @@ def handle_rpc(request: dict, surface: str, *, config=None, receipts: RemoteRece
             id=req_id,
             result=dict(
                 protocolVersion=params.get("protocolVersion") or "2024-11-05",
-                capabilities=dict(tools=dict(listChanged=False)),
+                capabilities=dict(tools=dict(listChanged=True)),
                 serverInfo=dict(name=f"mindie-agy-{surface}",
                                 version=read_json(Path(__file__).parent.parent / "plugin.json")["version"]),
             ),
@@ -671,9 +691,13 @@ def handle_rpc(request: dict, surface: str, *, config=None, receipts: RemoteRece
                 error=dict(code=-32602, message="MCP tools/call requires a tool name"),
             )
         if surface == "remote":
-            outcome = call_remote_surface(name, arguments, rpc_id=req_id, config=config, receipts=receipts)
+            outcome = call_remote_surface(
+                name, arguments, rpc_id=req_id, config=config, receipts=receipts, cancel=cancel
+            )
         else:
-            outcome = call_tools_surface(name, arguments, rpc_id=req_id, config=config, receipts=receipts)
+            outcome = call_tools_surface(
+                name, arguments, rpc_id=req_id, config=config, receipts=receipts, cancel=cancel
+            )
         return dict(jsonrpc="2.0", id=req_id, result=outcome)
     return dict(
         jsonrpc="2.0",
@@ -682,69 +706,39 @@ def handle_rpc(request: dict, surface: str, *, config=None, receipts: RemoteRece
     )
 
 
-def serve(surface: str, *, config=None) -> int:
+def serve(
+    surface: str,
+    *,
+    config=None,
+    stdin: BinaryIO | None = None,
+    stdout: BinaryIO | None = None,
+) -> int:
     if surface not in {"remote", "tools"}:
         raise ValueError(f"unsupported MCP surface: {surface}")
-    receipts = RemoteReceipts(remote_receipts_path(config))
+    from host_adapter import serve_concurrent_stdio
     from storage_lifecycle import hold_runtime_lease
 
+    receipts = RemoteReceipts(remote_receipts_path(config))
     with hold_runtime_lease():
-        for raw_line in sys.stdin.buffer:
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                req = json.loads(line.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                print(
-                    f"MindIE MCP parse error: {type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                )
-                sys.stdout.buffer.write(
-                    (
-                        json.dumps(
-                            {
-                                "jsonrpc": "2.0",
-                                "id": None,
-                                "error": {
-                                    "code": -32700,
-                                    "message": f"Parse error: {type(exc).__name__}: {exc}",
-                                },
-                            },
-                            ensure_ascii=False,
-                        )
-                        + "\n"
-                    ).encode("utf-8")
-                )
-                sys.stdout.buffer.flush()
-                continue
-            resp = handle_rpc(req, surface, config=config, receipts=receipts)
-            if resp is not None:
-                sys.stdout.buffer.write((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
-                sys.stdout.buffer.flush()
-    return 0
+        return serve_concurrent_stdio(
+            surface=surface,
+            rpc_handler=lambda req, cancel_ev: handle_rpc(
+                req, surface, config=config, receipts=receipts, cancel=cancel_ev
+            ),
+            watched_files=(config_path(config),),
+            stdin=stdin,
+            stdout=stdout,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    surface = argv[0] if argv else "tools"
+    positional = [arg for arg in argv if arg != "--once"]
+    surface = positional[0] if positional else "tools"
     from storage_lifecycle import hold_runtime_lease
 
-    if "--once" not in argv:
-        from remote_dev.mcp.catalog_refresh import profile_selection, serve_selected
-        # The resident front keeps its generation leased while it dispatches
-        # per-request helpers; otherwise a post-switch prune could retire the
-        # interpreter and payload it is still selecting from.
-        def _select():
-            sel_argv, sel_env = profile_selection(
-                config_path(), Path(__file__).resolve().parent, surface,
-                config_env="MINDIE_AGENT_CONFIG", plugin_env="AGY_PLUGIN_ROOT",
-            )
-            return sel_argv, {**sel_env, "MINDIE_MCP_CONNECTION_ID": _CONNECTION_SESSION_ID}
-
-        with hold_runtime_lease():
-            return serve_selected(_select)
-    return serve(surface)
+    with hold_runtime_lease():
+        return serve(surface)
 
 
 if __name__ == "__main__":

@@ -43,6 +43,7 @@ _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _PROCESS_TERMINATE = 0x0001
 _PROCESS_SET_QUOTA = 0x0100
 _STDLIB_POPEN = subprocess.Popen
+_STDLIB_OS = os
 
 
 class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
@@ -277,6 +278,56 @@ def run(
     child_env = dict(os.environ if env is None else env)
     child_env["PYTHONIOENCODING"] = "utf-8"
     child_env["PYTHONUTF8"] = "1"
+
+    if (
+        subprocess.Popen is _STDLIB_POPEN
+        and os is _STDLIB_OS
+        and max_output >= 1024
+        and (env is None or set(os.environ).issubset(child_env))
+    ):
+        try:
+            from mindie_harness.process.supervisor import (
+                Deadline,
+                OutputLimitError,
+                ProcessCancelledError,
+                ProcessSpec,
+                run_owned,
+            )
+        except ImportError:
+            pass
+        else:
+            spec = ProcessSpec(
+                argv=tuple(argv),
+                cwd=Path(cwd) if cwd is not None else None,
+                env=child_env,
+                stdin_bytes=(stdin_text or "").encode("utf-8"),
+                max_output_bytes=max_output,
+                mcp_response_cap_bytes=max(256, min(max_output, 1024 * 1024)),
+                memory_limit_bytes=None,
+                allowed_returncodes=None,
+            )
+            try:
+                outcome = run_owned(
+                    spec,
+                    deadline=Deadline.from_timeout(float(timeout)),
+                    cancel=cancel,
+                )
+            except OutputLimitError as exc:
+                raise OutputLimitExceeded(f"process output exceeded {max_output} bytes") from exc
+            except ProcessCancelledError as exc:
+                raise RuntimeError("operation cancelled by caller") from exc
+            except TimeoutError as exc:
+                raise TimeoutError(f"process timed out after {timeout:.2f}s: {argv[0]}") from exc
+            result = ProcessResult(
+                returncode=int(outcome.returncode if outcome.returncode is not None else -1),
+                stdout=outcome.stdout,
+                stderr=outcome.stderr,
+                elapsed_ms=int(outcome.elapsed_ms),
+                cleanup_failed=bool(outcome.cleanup_issues),
+            )
+            if allowed_returncodes is not None and result.returncode not in allowed_returncodes:
+                result.checked_stdout()
+            return result
 
     cleanup_failed = False
     with tempfile.TemporaryDirectory(prefix="mindie-agy-proc-", ignore_cleanup_errors=True) as tmp_dir:

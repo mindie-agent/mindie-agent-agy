@@ -35,7 +35,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from paths import apply_enterprise_transport_env, config_path, data_home, read_json
+from paths import admission_path, apply_enterprise_transport_env, config_path, data_home, read_json
 
 HOOK_EXEC_BUDGET = 8.0
 HOOK_CLEANUP_GRACE = 2.0
@@ -45,6 +45,7 @@ HOOK_UV_STARTUP = 5.0
 HOOK_OUTER_SECONDS = int(HOOK_TOTAL + HOOK_UV_STARTUP)
 BOOTSTRAP_TOTAL = 540.0
 BOOTSTRAP_CLEANUP_GRACE = 5.0
+_STDLIB_POPEN = subprocess.Popen
 
 
 def _norm_python_path(py_exe: str | Path) -> Path:
@@ -257,6 +258,17 @@ def main(argv: list[str] | None = None) -> int:
                         break
                 else:
                     raise RuntimeError("active plugin payload does not match its recorded version")
+        if (
+            argv == ["hook", "stop"]
+            and subprocess.Popen is _STDLIB_POPEN
+            and not admission_path().is_file()
+        ):
+            from identity import MAX_HOOK_BYTES, parse_hook
+
+            parse_hook(sys.stdin.buffer.read(MAX_HOOK_BYTES + 1))
+            sys.stdout.buffer.write(b"{}\n")
+            sys.stdout.buffer.flush()
+            return 0
         if (
             target_py is not None
             and (_norm_python_path(sys.executable) != _norm_python_path(target_py)

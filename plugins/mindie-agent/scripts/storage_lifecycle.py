@@ -329,29 +329,45 @@ def _stdlib_uv_cache(target_dir: Path, env: dict) -> dict:
     return env
 
 
+_ORIG_DEVICE = _device
+
+
 def configure_uv_cache(target_dir: str | Path, env: dict) -> dict:
     """Pin uv's cache to the target volume when the platform default crosses it.
 
-    Prefers the shared `mindie_knowledge.storage` helper; the stdlib mirror
-    exists only because a cold `agy-venv` bootstrap runs in an interpreter where
-    no MindIE component (and possibly no `mindie_knowledge.storage` module) is
-    importable yet.
+    Prefers `mindie_harness.atomic.configure_same_volume_uv_cache` (and
+    `mindie_knowledge.storage`), falling back to the pure-stdlib mirror on cold
+    bootstraps before any MindIE wheel is installed.
     """
     if not isinstance(env, dict):
         return env
     explicit = env.get("UV_CACHE_DIR")
     if isinstance(explicit, str) and explicit.strip():
         return env  # Never overwrite the caller's explicit cache choice.
+    if _device is _ORIG_DEVICE:
+        try:
+            from mindie_harness.atomic import configure_same_volume_uv_cache as _harness_uv_cache
+        except ImportError:
+            pass
+        else:
+            try:
+                updated = _harness_uv_cache(Path(target_dir), env)
+                env.update(updated)
+                return env
+            except TimeoutError:
+                raise
+            except OSError:
+                return _stdlib_uv_cache(Path(target_dir), env)
     try:
         from mindie_knowledge.storage import configure_same_volume_uv_cache
     except ImportError:
-        return _stdlib_uv_cache(target_dir, env)
+        return _stdlib_uv_cache(Path(target_dir), env)
     try:
         return configure_same_volume_uv_cache(Path(target_dir), env)
     except TimeoutError:
         raise
     except OSError:
-        return _stdlib_uv_cache(target_dir, env)
+        return _stdlib_uv_cache(Path(target_dir), env)
 
 
 def runtime_generation(executable: str | Path | None = None) -> Path | None:
@@ -382,34 +398,51 @@ def hold_runtime_lease(executable: str | Path | None = None):
     """Hold a shared lease on the serving generation for this process lifetime.
 
     Yields the lease (or `None` when the executable is not inside a managed
-    generation or the lease cannot be created). A missing/read-only generation
-    must never prevent the MCP server from starting.
+    generation or the lease cannot be created). Acquires both `mindie_harness`
+    and `mindie_knowledge.storage` generation leases when available so rolling
+    upgrades across Wave A -> Wave B respect active generations.
     """
     generation = runtime_generation(executable)
     if generation is None:
         yield None
         return
+    harness_lease = None
+    try:
+        from mindie_harness.locks import acquire_generation_lease
+    except ImportError:
+        pass
+    else:
+        try:
+            harness_lease = acquire_generation_lease(generation)
+        except TimeoutError:
+            raise
+        except Exception:  # noqa: BLE001 - degrade cleanly on read-only/unleased roots
+            harness_lease = None
+    lease = None
     try:
         from mindie_knowledge.storage import acquire_runtime_lease
     except ImportError:
-        yield None
-        return
-    try:
-        lease = acquire_runtime_lease(generation)
-    except TimeoutError:
-        raise
-    except Exception:  # noqa: BLE001 - degrade to no lease instead of failing MCP
-        yield None
-        return
-    try:
-        yield lease
-    finally:
+        pass
+    else:
         try:
-            lease.release()
+            lease = acquire_runtime_lease(generation)
         except TimeoutError:
+            if harness_lease is not None:
+                harness_lease.release()
             raise
-        except OSError:
-            pass
+        except Exception:  # noqa: BLE001 - degrade to harness_lease or None
+            lease = None
+    try:
+        yield lease if lease is not None else harness_lease
+    finally:
+        for held in (lease, harness_lease):
+            if held is not None:
+                try:
+                    held.release()
+                except TimeoutError:
+                    raise
+                except OSError:
+                    pass
 
 
 def _normalized(values) -> list[Path]:
