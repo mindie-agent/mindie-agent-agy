@@ -1,58 +1,41 @@
-# MindIE Agent — Google Antigravity Native Harness Plugin (`mindie-agent-agy`)
+# MindIE Agent — Google Antigravity Native Host Plugin (`mindie-agent-agy`)
 
-This repository implements the **Google Antigravity (AGY) Native Harness Plugin** (`plugins/mindie-agent/`) for MindIE Agent. It bridges Antigravity's native customization surfaces (`plugin.json`, root `hooks.json`, `mcp_config.json`, `skills/mindie-agent/SKILL.md`, and brain `transcript_full.jsonl` / `transcript.jsonl`) to the shared MindIE runtime components (`mindie_knowledge`, `remote_dev`, `mindie_diagnostics`, `mindie_coordinator`, `mindie_profiler`, and `mindie_sim`).
+`mindie-agent-agy` is a **`host-plugin`** repository implementing the Google Antigravity (`agy`) native host plugin (`plugins/mindie-agent/`). It bridges Antigravity's native hooks (`plugins/mindie-agent/hooks.json`), stdio MCP servers (`mcp_config.json`), skill entry (`skills/mindie-agent/SKILL.md`), and brain JSONL transcripts (`agy_transcript.py`) to `mindie-harness` (`v0.1.0`) and the shared MindIE runtime components.
 
----
+## 1. Core Architectural & Contract Rules
 
-## 1. Plugin Script Navigation & Call Graph
+- **Frozen Root `hooks.json` Contract**: `plugins/mindie-agent/hooks.json` MUST remain byte-for-byte identical (`979` bytes, `sha256 == 33b564c78b439205fd4acfe095c83b15770043ff462d636e2a89f14620cdfc3f`) at the plugin root (`plugins/mindie-agent/hooks.json`, never `hooks/hooks.json`).
+- **Passive Default & `< 100ms` Inactive `Stop` (`P2.1` & `P2.2`)**:
+  - Unactivated `Stop` (`hook stop` when no `/mindie-agent` session lease is active) MUST return `{}` in `< 100ms` with zero child re-exec, zero network I/O, zero virtualenv builds, and zero transcript reads, and `Stop` NEVER emits `"decision": "continue"`.
+  - Default MCP `tools/list` (`mindie-remote-dev`, `mindie-tools`) NEVER exposes `knowledge_*` tools; private knowledge operations remain gated behind `knowledge_cli.py` and an active `/mindie-agent` session lease (`entry_enabled == 1`).
+- **Zero Pre-Call Session-Binding Gates on Deterministic Tools (`P2.7`)**:
+  - Standard MCP `tools/call` on `mindie-remote-dev` (`remote_*`) and `mindie-tools` (`profiler`, `sim`, `coordinator`, `debugger`, `npu_top`, `diagnostics_*`, `mindie_status`) works with zero `_meta`, zero `PreToolUse` binds, and zero `AGY_CONVERSATION_ID`, falling back to `_CONNECTION_SESSION_ID`.
+- **Concurrent Resident Stdio MCP & `mindie-harness` Substrate (`AD-03`, `AD-07`, `AD-10`)**:
+  - `mcp_server.py` and `host_adapter.py` (`AGYHostAdapter`) serve `Content-Length` and JSONL frames concurrently in-process across separate read/control and mutation worker pools while holding a runtime `.inuse` generation lease (`hold_runtime_lease`), with zero cold `--once` per-call spawns.
+  - Bundled `assets/mindie-harness-seed.pyz` is verified in `64 KiB` streaming chunks against `assets/seed-lock.json` (`mindie-harness-seed/1`).
+  - `rsi_loop.py` and `experiment_ledger.py` delegate to `mindie_harness.rsi` (`mindie_knowledge.graded` fallback on pre-Wave-B runtimes).
+  - Never use blanket `O_NOFOLLOW` on config/checkout metadata reads (`AD-07`), never mutate `~/.gemini`, and never leak benchmark evaluation tuples or ledger gates into `SKILL.md` (`AD-10`).
+- **State & Receipt Honesty (Principles 9, 10, 14, 17)**:
+  - Keep every module in `plugins/mindie-agent/scripts/` and `tests/` `< 800` lines with `[Role]`, `[Invariants]`, `[Timeouts & Locks]`, and `[Side-Effect Policy]` in the top 30 lines of production scripts.
+  - Always place `except TimeoutError: raise` before `except OSError:`. Once a primary remote/component operation succeeds, local receipt/bind accounting failures keep `isError=False` and attach `receipt_warning` + `receipt_unconfirmed=True`.
 
-All plugin scripts live under `plugins/mindie-agent/scripts/` and include standardized top-of-file Agent Contract docstrings (`[Role]`, `[Invariants]`, `[Timeouts & Locks]`, `[Side-Effect Policy]`):
+## 2. Plugin Script Map (`plugins/mindie-agent/scripts/`)
 
-| Layer | Script | Role & Key Responsibilities |
-| :--- | :--- | :--- |
-| **Native Entry & Setup** | `mindie_launch.py` | Stable entrypoint invoked by `hooks.json` and `mcp_config.json`. Enforces `HOOK_TOTAL=10.0s`, `HOOK_LOCK_BUDGET=2.0s`, and `BOOTSTRAP_TOTAL=540.0s`, re-executing into the configured `.venv` interpreter when needed. |
-| | `setup.py` / `paths.py` | Resolves MindIE-owned paths (`~/.config/mindie-agent/agy.json`, never mutating `~/.gemini`), validates `product-contract.json` & `harness-compatibility.json`, and writes atomic configs via `os.replace()`. |
-| **Host Hook Lifecycle** | `bridge.py` | Implements Antigravity `SessionStart`, `PreInvocation` (`/mindie-agent` manual activation/deactivation/status), `PreToolUse` (one-shot MCP call bind), and `Stop` (turn-end capture handoff; never returns `"decision": "continue"`). |
-| | `admission.py` | Thin wrapper around `mindie_knowledge.loop.activation.Admission` (`activate`, `deactivate`, `knowledge_lease`, and factual `status_facts` without onboarding prompts). |
-| | `identity.py` | Validates camelCase Antigravity hook payloads (`conversationId`, `workspacePaths`, `transcriptPath`, `lastUserInput`, `toolCall`, `stepIdx`) and manages `mcp-binds.sqlite3` (WAL + `busy_timeout=5000`). |
-| **MCP Server & Private Knowledge CLI** | `mcp_server.py` | Public stdio JSON-RPC MCP server for `mindie-remote-dev` and `mindie-tools` (`profiler`, `sim`, `coordinator`, `diagnostics_*`, `mindie_status`). Exposes zero knowledge tools in `tools/list`, requires zero pre-call session/hook binds on deterministic surfaces (falling back to connection-scoped identity when `PreToolUse` or `AGY_CONVERSATION_ID` is absent), and preserves succeeded remote/tool results if local receipt/bind accounting fails. |
-| | `knowledge_cli.py` | Private CLI (`describe`, `knowledge_query`, `knowledge_explain`, `knowledge_feedback`, `knowledge_distill`, `knowledge_sync`) gated by `Admission.knowledge_lease(session_id)` (`entry_enabled == 1`). |
-| **Component Update & Storage Lifecycle** | `component_update.py` | Background/foreground shared-component updater. Serializes `check()` under `<data_home>/agy-component-update.lock` (bounded wait, `status="busy"` on contention), then atomically rebinds `agy.json` / `agy.engine.json`. |
-| | `storage_lifecycle.py` | Bounded post-switch two-phase retirement (`prune_component_runtimes` + `sweep_legacy_installations`) that keeps the active/rollback generation, borrowed interpreters, live leases, and external Git checkouts; also pins a same-volume uv cache and holds the resident MCP generation lease. |
-| **Transcript & Summary Worker** | `agy_transcript.py` | Incremental reader for Antigravity `<appDataDir>/brain/<conversationId>/.system_generated/logs/transcript_full.jsonl` (and `transcript.jsonl`), extracting only public `USER_INPUT` and `PLANNER_RESPONSE` text while stripping `thinking`, `tool_calls`, and `<ADDITIONAL_METADATA>`. |
-| | `organizer.py` | Isolated summary and C6 distillation worker emitting `mindie-summary-outcome/1` envelopes (`returned` / `failed` / `outcome_unknown`) without retrying uncertain paid calls. |
-| | `bounded.py` | Bounded subprocess runner with POSIX process-group and Windows Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) tree termination. |
+| Module | Role |
+| :--- | :--- |
+| `mindie_launch.py` | Entrypoint for `hook`, `mcp`, `setup`, and `update`; `< 100ms` passive `Stop` fast-path and paired `(python, runtime_scripts)` re-exec. |
+| `host_adapter.py` | `AGYHostAdapter` (`mindie_harness.api.HostAdapter`), `verify_seed_bundle()`, and concurrent dual-framing stdio loop (`serve_concurrent_stdio`). |
+| `bridge.py` / `admission.py` / `identity.py` | Antigravity `SessionStart`, `PreInvocation` (`/mindie-agent`), `PreToolUse` one-shot bind, and `Stop` handoff. |
+| `mcp_server.py` / `knowledge_cli.py` | Public deterministic MCP surfaces (`remote`, `tools`) and private lease-gated knowledge CLI. |
+| `setup.py` / `component_update.py` / `storage_lifecycle.py` | Atomic `agy.json` / `agy-source` provisioning, candidate-first component updates, and bounded `.trash/` generation reclamation. |
+| `agy_transcript.py` / `organizer.py` | Read-only Antigravity brain JSONL projection and isolated summary/C6 distillation worker. |
+| `bounded.py` / `diagnostic_support.py` / `rsi_loop.py` | `mindie_harness.process` subprocess delegation, symlink-safe sanitized fault recording, and `mindie_harness.rsi` entrypoints. |
 
-### Call Graph
+## 3. Local Verification
 
-```text
-Antigravity Hook (SessionStart / PreInvocation / PreToolUse / Stop)
-  └─► mindie_launch.py hook <event> (HOOK_TOTAL=10.0s)
-        └─► bridge.py
-              ├─► SessionStart ──► admission.knowledge_lease (passive when inactive)
-              ├─► PreInvocation ──► identity.parse_mindie_gesture (/mindie-agent)
-              │     ├─► admission.activate / deactivate
-              │     └─► setup.ensure_default_profile (degrades gracefully without revoking lease)
-              ├─► PreToolUse ──► identity.publish_bind (mcp-binds.sqlite3 WAL)
-              └─► Stop ──► agy_transcript.capture_source ──► mindie_knowledge.loop.cli.capture_hook
-
-Antigravity MCP Client (stdio JSON-RPC)
-  └─► mindie_launch.py mcp (remote | tools) ──► mcp_server.py
-        ├─► identity.claim_bind / finish_bind
-        ├─► RemoteReceipts (remote-receipts.sqlite3 WAL + busy_timeout=5000)
-        ├─► remote_dev.mcp.tools (remote_* + Antigravity native aliases)
-        └─► bounded.run (profiler, sim, coordinator, diagnostics_*, mindie_status)
-
-Antigravity Agent (after /mindie-agent activation)
-  └─► knowledge_cli.py (describe | knowledge_query | knowledge_explain | knowledge_feedback | knowledge_distill | knowledge_sync)
-        └─► admission.knowledge_lease (requires entry_enabled == 1) ──► mindie_knowledge service RPC
-```
-
----
-
-## 2. Verification Commands
+Isolate `HOME`, `MINDIE_CONFIG_HOME`, `MINDIE_DATA_HOME`, and `MINDIE_DIAGNOSTICS_ROOT` (enforced by `tests/conftest.py`), and verify Unix `LF` line endings before every commit:
 
 ```bash
-# Run full Tier 0 + Tier 1 unit and contract suite
-../.venv/Scripts/python.exe -m pytest tests -q
+python3 .github/scripts/check_lf_eol.py
+pytest -q -m "not live_npu"
 ```

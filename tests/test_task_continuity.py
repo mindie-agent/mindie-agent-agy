@@ -115,10 +115,11 @@ def test_admission_failure_does_not_terminate_stdio_server(tmp_path, monkeypatch
     assert replies[4]["result"]["tools"]
 
 
-def test_duplicate_rpc_frame_is_rejected_even_after_bind_consumption(session, tmp_path):
+def test_duplicate_rpc_frame_is_rejected_even_after_bind_consumption(session, tmp_path, monkeypatch):
     import os
     from identity import publish_bind
 
+    monkeypatch.delenv("REMOTE_DEV_SESSION_ID", raising=False)
     receipts = mcp_server.RemoteReceipts(tmp_path / "receipts.sqlite3")
     arguments = {"host": "auth.example", "port": 22, "action": "status"}
     bound_session = "454c6ee9-afea-47be-8188-abb9c7fb1f26"
@@ -131,5 +132,10 @@ def test_duplicate_rpc_frame_is_rejected_even_after_bind_consumption(session, tm
     assert replay["result"]["isError"] is True
     fresh = mcp_server.handle_rpc({**req, "id": 78}, "remote", receipts=receipts)
     assert fresh["result"]["isError"] is False
-    assert os.environ["REMOTE_DEV_SESSION_ID"] == bound_session
+    assert "REMOTE_DEV_SESSION_ID" not in os.environ
+    with sqlite3.connect(receipts.path) as db:
+        assert [row[0] for row in db.execute("SELECT session FROM receipts ORDER BY started")] == [
+            bound_session,
+            bound_session,
+        ]
 
