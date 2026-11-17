@@ -1,19 +1,17 @@
-"""Private knowledge entry loaded only by the explicitly invoked `/mindie-agent` Skill.
+"""Default-enabled knowledge catalog and RPC dispatcher for Antigravity (`knowledge_cli.py`).
 
 [Role]
-Exposes the private knowledge tool catalog (`describe`) and executes authorized
-knowledge operations (`knowledge_query`, `knowledge_explain`, `knowledge_feedback`,
-`knowledge_distill`, `knowledge_sync`) for an activated Antigravity session.
+Defines `KNOWLEDGE_TOOL_SCHEMAS` for `mindie-tools` MCP discovery (`describe`)
+and executes graded knowledge operations (`knowledge_query`, `knowledge_explain`,
+`knowledge_feedback`, `knowledge_distill`, `knowledge_sync`) for Antigravity.
 
 [Invariants]
-- Neither this catalog nor its tool descriptions ever appear in default MCP
-  discovery (`mcp_config.json` / `mcp_server.py`).
-- Native session identity comes strictly from `AGY_CONVERSATION_ID` in the
-  environment (or `--session` verified against `Admission.knowledge_lease`),
-  never from model-supplied tool arguments.
-- Both `describe` and every `knowledge_*` operation require an active manual
-  session lease (`entry_enabled == 1`), raising `KnowledgeInactive` (`code="knowledge_inactive"`)
-  when unactivated.
+- Knowledge tools are enabled by default whenever the `mindie-agent` plugin is
+  enabled in Antigravity, and reject with `KnowledgeInactive` (`code="knowledge_inactive"`)
+  only when the conversation was explicitly muted via `/mindie-agent deactivate`.
+- Session identity comes from `PreToolUse` / `AGY_CONVERSATION_ID` / `--session`
+  (falling back to `"agy-cli-default"` or MCP connection scope), never from
+  model-supplied tool arguments.
 - Receipt Honesty: if a knowledge RPC succeeds and local lease outcome accounting
   fails, `isError` stays `False` and an `accounting` warning is attached.
 
@@ -22,9 +20,8 @@ knowledge operations (`knowledge_query`, `knowledge_explain`, `knowledge_feedbac
   `summary_budget.distill_rpc_timeout()`. Input arguments are bounded to `1 MiB`.
 
 [Side-Effect Policy]
-- `describe` is purely read-only (`Admission.knowledge_lease` + static schema).
-  Tool calls connect to the configured `mindie_knowledge` service only after
-  verifying the manual lease.
+- `describe` is purely read-only. Tool calls provision a default profile/lease
+  on demand when not muted and connect to the configured `mindie_knowledge` service.
 """
 
 from __future__ import annotations
@@ -39,22 +36,22 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from admission import gate, knowledge_lease
-from identity import require_session
-from paths import config_path, engine_config_path, read_json
+from admission import ensure_default_lease, gate, is_deactivated
+from identity import require_session, require_session_or_scope
+from paths import admission_path, config_path, engine_config_path, read_json
 
 MAX_INPUT_BYTES = 1024 * 1024
 KNOWLEDGE_RPC_TIMEOUT = 30.0
 
 
 class KnowledgeInactive(ValueError):
-    """The current conversation has not manually activated `/mindie-agent`."""
+    """The current conversation muted knowledge via `/mindie-agent deactivate`."""
 
     code = "knowledge_inactive"
 
 
 class LeaseRequired(ValueError):
-    """The target domain requires its own active manual lease."""
+    """The target domain requires an active lease."""
 
     code = "lease_required"
 
@@ -178,7 +175,9 @@ KNOWLEDGE_NAMES = {item["name"] for item in KNOWLEDGE_TOOL_SCHEMAS}
 
 def native_session() -> str:
     raw = os.environ.get("AGY_CONVERSATION_ID", "")
-    return require_session(raw)
+    if isinstance(raw, str) and raw.strip():
+        return require_session(raw)
+    return "agy-cli-default"
 
 
 def _select_engine_path(config: str | Path | None, arguments: dict) -> Path:
@@ -213,19 +212,50 @@ def invoke(
     session: str | None = None,
     config: str | Path | None = None,
 ) -> dict:
-    session_id = require_session(session) if session is not None else native_session()
-    lease = knowledge_lease(session_id, config=config)
-    if lease is None:
+    session_id = require_session_or_scope(session) if session is not None else native_session()
+    if is_deactivated(session_id, config=config):
         raise KnowledgeInactive(
-            "Knowledge requires manual /mindie-agent activation in this conversation"
+            "MindIE knowledge was deactivated for this conversation via /mindie-agent deactivate; "
+            "send /mindie-agent to re-enable"
         )
     if operation == "describe":
         return dict(tools=KNOWLEDGE_TOOL_SCHEMAS, isError=False)
     if operation not in KNOWLEDGE_NAMES:
         raise ValueError(f"unknown knowledge operation: {operation}")
 
+    cfg_file = config_path(config)
+    if not cfg_file.is_file():
+        try:
+            from setup import ensure_default_profile
+
+            ensure_default_profile(config=cfg_file, workspace_root=os.getcwd())
+        except TimeoutError:
+            raise
+        except Exception:
+            pass
+
     args = dict(arguments or {})
     target_engine = _select_engine_path(config, args)
+    lease = ensure_default_lease(session_id, config=config)
+    adm_store = gate(config)
+    if target_engine.is_file():
+        eng_adm = read_json(target_engine).get("admission_path")
+        if isinstance(eng_adm, str) and os.path.isabs(eng_adm) and Path(eng_adm).resolve() != admission_path(config).resolve():
+            from mindie_knowledge.loop.activation import Admission
+
+            adm_store = Admission(eng_adm)
+            if adm_store.inspect(session_id).get("status") == "inactive":
+                raise KnowledgeInactive(
+                    "MindIE knowledge was deactivated for this conversation via /mindie-agent deactivate; "
+                    "send /mindie-agent to re-enable"
+                )
+            adm_store.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            lease = adm_store.activate(
+                session_id,
+                project_root=lease.get("project_root") or str(Path(os.getcwd()).resolve()),
+                root_session=session_id,
+                not_before=0.0,
+            )
     token = lease.get("token")
 
     from mindie_knowledge.loop.cli import ensure_service
@@ -289,7 +319,7 @@ def invoke(
             neutral = True
         if token is not None and not neutral:
             try:
-                gate(config).finish(session_id, token, succeeded)
+                adm_store.finish(session_id, token, succeeded)
             except Exception as exc:
                 if pending is None:
                     result["accounting"] = dict(
@@ -311,7 +341,12 @@ def _format_failure(exc: Exception) -> dict:
     message = str(exc) or type(exc).__name__
     return dict(
         content=[dict(type="text", text=message)],
-        structuredContent=dict(code=code, error=message, automatic_retry=False),
+        structuredContent=dict(
+            code=code,
+            error=message,
+            error_type=type(exc).__name__,
+            automatic_retry=False,
+        ),
         isError=True,
     )
 

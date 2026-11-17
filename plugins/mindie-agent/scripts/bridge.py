@@ -2,44 +2,44 @@
 
 [Role]
 Implements Antigravity's native hook contracts (`hooks.json`), bridging
-`SessionStart`, `PreInvocation` (`/mindie-agent` manual gesture), `PreToolUse`
-(one-shot MCP call binding), and `Stop` (turn-end redacted transcript handoff).
+`SessionStart` (passive background update check), `PreInvocation` (`/mindie-agent`
+status/mute/re-enable gesture), `PreToolUse` (one-shot MCP call binding), and
+`Stop` (opt-in redacted transcript capture when community sharing is enabled).
 
 [Invariants]
-- Passive Default: `SessionStart` and ordinary `PreInvocation` prompts without
-  `/mindie-agent` or `$mindie-agent` never activate a lease, start the knowledge
-  service, or capture transcripts (`PreInvocation` returns `{}` immediately).
-- Lease Honesty: if `Admission.activate` succeeds on `/mindie-agent` in
-  `PreInvocation` but background service readiness fails, the active lease is
-  preserved (`status="degraded"` warning injected) rather than revoked.
+- Default-Enabled Plugin & Zero-I/O Ordinary Hooks: `SessionStart` and ordinary
+  `PreInvocation` prompts perform zero SQLite I/O and return `{}` immediately.
+- Cold/Disabled `Stop` Fast-Path: when unconfigured or community sharing is
+  disabled, `Stop` returns `{}` in `< 5ms` before opening `admission.sqlite3`.
+  `Stop` never returns `"decision": "continue"`.
 - `PreToolUse` bind failures, including `TimeoutError`, return
-  `"decision": "deny"` with the exception and exit 0 so the host consumes
-  stdout; raising or a non-zero exit would drop the JSON and fail-open.
-  They never fall through to `"allow"`.
-- `Stop` never returns `"decision": "continue"` (never forces model
-  continuation). Unactivated sessions short-circuit with `{}` before reading
-  sharing settings or transcripts. Capture failures, including `TimeoutError`,
-  emit `injectSteps.ephemeralMessage` (the same host field as `PreInvocation`).
-- Background updater spawn failure is stderr + `injectSteps`; it never
-  aborts `SessionStart` with empty stdout.
+  `"decision": "deny"` with exit 0 so the host consumes stdout (never fail-open).
+- Lease Honesty: if `activate` succeeds in `PreInvocation` while profile
+  provisioning degrades, the lease remains active (`status="degraded"`).
 
 [Timeouts & Locks]
 - Runs within `mindie_launch.py`'s `HOOK_TOTAL = 10.0s` budget; SQLite WAL
   writes use `5.0s` busy timeout.
 
 [Side-Effect Policy]
-- Mutates `admission.sqlite3` on `/mindie-agent`, writes one-shot binds to
-  `mcp-binds.sqlite3` on `PreToolUse`, and hands off eligible `Stop` events to
-  `mindie_knowledge.loop.cli.capture_hook`.
+- Mutates `admission.sqlite3` on `/mindie-agent` gestures or eligible `Stop`
+  captures, writes one-shot binds to `mcp-binds.sqlite3` on `PreToolUse`, and
+  hands off eligible `Stop` events to `mindie_knowledge.loop.cli.capture_hook`.
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import sys
 
-from admission import activate, deactivate, knowledge_lease, status_facts
+from admission import (
+    activate,
+    deactivate,
+    ensure_default_lease,
+    is_deactivated,
+    knowledge_lease,
+    status_facts,
+)
 from agy_transcript import capture_source
 from component_update import trigger_background_update_if_due
 from identity import (
@@ -56,7 +56,6 @@ from paths import (
     config_path,
     engine_config_path,
     plugin_root,
-    read_json,
 )
 
 
@@ -80,42 +79,19 @@ def _read_stdin_event() -> dict:
 
 
 def handle_session_start(event: dict | None = None, *, config=None) -> dict:
-    """`SessionStart` hook: passive by default; never activates a knowledge lease."""
-    event = _read_stdin_event() if event is None else event
-    update_warning = ""
+    """`SessionStart` hook: passive background update check; zero SQLite I/O."""
+    _ = _read_stdin_event() if event is None else event
     try:
         trigger_background_update_if_due(config=config)
-    except TimeoutError as exc:
+    except Exception as exc:
         detail = _hook_failure_text("background updater spawn failed", exc)
         print(f"MindIE {detail}", file=sys.stderr)
         return _hook_warning_steps(detail)
-    except Exception as exc:
-        update_warning = _hook_failure_text("background updater spawn failed", exc)
-        print(f"MindIE {update_warning}", file=sys.stderr)
-    try:
-        session = session_from_hook(event)
-    except ValueError:
-        return _hook_warning_steps(update_warning) if update_warning else {}
-    lease = knowledge_lease(session, config=config)
-    if lease is None:
-        return _hook_warning_steps(update_warning) if update_warning else {}
-    steps = [
-        {
-            "systemMessage": {
-                "systemMessage": (
-                    f"MindIE Agent knowledge lease is active for conversation {session} "
-                    f"(project_root={lease.get('project_root')})."
-                )
-            }
-        }
-    ]
-    if update_warning:
-        steps.append({"ephemeralMessage": update_warning})
-    return {"injectSteps": steps}
+    return {}
 
 
 def handle_pre_invocation(event: dict | None = None, *, config=None) -> dict:
-    """`PreInvocation` hook: handles explicit `/mindie-agent` or `$mindie-agent` gestures."""
+    """`PreInvocation` hook: handles optional `/mindie-agent` status/deactivate/activate gestures."""
     event = _read_stdin_event() if event is None else event
     is_gesture, remainder = parse_mindie_gesture(event)
     if not is_gesture:
@@ -133,8 +109,9 @@ def handle_pre_invocation(event: dict | None = None, *, config=None) -> dict:
             )
         else:
             msg = (
-                "MindIE knowledge is deactivated for this conversation. "
-                "Deterministic tools (remote-dev, profiler, sim, coordinator, diagnostics) remain available."
+                "MindIE knowledge and background Stop capture are deactivated for this conversation. "
+                "Deterministic tools on mindie-remote-dev and mindie-tools remain available; "
+                "send /mindie-agent to re-enable."
             )
         return {"injectSteps": [{"ephemeralMessage": msg}]}
 
@@ -150,10 +127,7 @@ def handle_pre_invocation(event: dict | None = None, *, config=None) -> dict:
         }
 
     lease_info = activate(session, workspace_root, config=config)
-    scripts_dir = Path(__file__).resolve().parent
     skill_path = plugin_root() / "skills" / "mindie-agent" / "SKILL.md"
-    knowledge_cli = scripts_dir / "knowledge_cli.py"
-
     readiness_warning = ""
     cfg_file = config_path(config)
     if not cfg_file.is_file():
@@ -168,31 +142,12 @@ def handle_pre_invocation(event: dict | None = None, *, config=None) -> dict:
                 "the session lease remains active."
             )
 
-    py_exe = "python"
-    if cfg_file.is_file():
-        try:
-            cfg_py = read_json(cfg_file).get("python")
-            if isinstance(cfg_py, str) and cfg_py and Path(cfg_py).is_file():
-                py_exe = f'"{cfg_py}"'
-        except ValueError:
-            pass
-    ps_prefix = "& " if py_exe.startswith('"') else ""
-    shell_hint = (
-        f"PowerShell (`{ps_prefix}{py_exe} -I -X utf8 \"{knowledge_cli}\" --session \"{session}\" describe` / "
-        f"`{ps_prefix}{py_exe} -I -X utf8 \"{knowledge_cli}\" --session \"{session}\" <tool_name> --input-file <json_file>`) "
-        f"or cmd.exe / POSIX shells (`{py_exe} -I -X utf8 \"{knowledge_cli}\" --session \"{session}\" describe`)"
-        if ps_prefix
-        else (
-            f"`{py_exe} -I -X utf8 \"{knowledge_cli}\" --session \"{session}\" describe` / "
-            f"`{py_exe} -I -X utf8 \"{knowledge_cli}\" --session \"{session}\" <tool_name> --input-file <json_file>` "
-            "(PowerShell, cmd.exe, and POSIX shells)"
-        )
-    )
     msg = (
-        f"The user explicitly enabled MindIE Agent for conversation `{session}` "
+        f"MindIE Agent is active for conversation `{session}` "
         f"(project_root=`{lease_info['project_root']}`, status=`{lease_info['status']}`). "
-        f"Read the MindIE Agent skill instructions at `{skill_path}` and invoke private knowledge tools "
-        f"via {shell_hint}.{readiness_warning}"
+        f"Follow `{skill_path}` and invoke `knowledge_query`, `knowledge_explain`, "
+        f"`knowledge_feedback`, `knowledge_distill`, and `knowledge_sync` directly via the "
+        f"`mindie-tools` MCP server.{readiness_warning}"
     )
     return {"injectSteps": [{"ephemeralMessage": msg}]}
 
@@ -251,20 +206,29 @@ def handle_stop(event: dict | None = None, *, config=None) -> dict:
         session = session_from_hook(event)
     except ValueError:
         return {}
-    lease = knowledge_lease(session, config=config)
-    if lease is None:
-        return {}
     if not config_path(config).is_file():
         return {}
-    allowed, reason = _allows_community_capture(lease["project_root"], config=config)
+    workspace_root: str | None = None
+    try:
+        workspace_root = workspace_from_hook(event)
+    except ValueError:
+        existing = knowledge_lease(session, config=config)
+        if existing is not None and isinstance(existing.get("project_root"), str):
+            workspace_root = existing["project_root"]
+    if not workspace_root:
+        return {}
+    allowed, _reason = _allows_community_capture(workspace_root, config=config)
     if not allowed:
+        return {}
+    if is_deactivated(session, config=config):
         return {}
     transcript = transcript_from_hook(event)
     if not transcript:
         return {}
     try:
+        lease = ensure_default_lease(session, workspace_root, not_before=0.0, config=config)
         source = capture_source(transcript, session, binding=lease)
-    except (TimeoutError, OSError, ValueError) as exc:
+    except Exception as exc:
         detail = _hook_failure_text("Stop transcript capture failed", exc)
         print(f"MindIE {detail}", file=sys.stderr)
         return _hook_warning_steps(detail)

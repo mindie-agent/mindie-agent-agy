@@ -33,6 +33,7 @@ def test_hooks_json_frozen_byte_for_byte_contract():
 
 def test_passive_stop_hook_returns_empty_json_under_100ms_without_reexec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import mindie_launch
+    import paths
 
     # Warm one cold Python startup measurement, then measure actual passive Stop subprocess latency
     launch_script = SCRIPTS_DIR / "mindie_launch.py"
@@ -60,6 +61,7 @@ def test_passive_stop_hook_returns_empty_json_under_100ms_without_reexec(tmp_pat
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     assert json.loads(completed.stdout) == {}
     assert elapsed_ms < 100.0, f"Passive Stop took {elapsed_ms:.1f}ms (>= 100ms budget)"
+    assert not paths.admission_path().exists()
 
     # Malformed stdin JSON must still raise rather than silently emitting {}
     monkeypatch.setattr(sys, "stdin", type("BadIn", (), {"buffer": io.BytesIO(b"{not-json")})())
@@ -105,8 +107,14 @@ def test_host_adapter_and_harness_rsi_delegation(tmp_path: Path):
     assert adapter.extract_session_identity({}, {"AGY_CONVERSATION_ID": SESSION_ID}) == SESSION_ID
     assert adapter.extract_session_identity({"params": {"arguments": {"conversationId": SESSION_ID}}}, {}) is None
     tool_names = {t["name"] for t in adapter.mcp_tools("tools", profile)}
-    assert "mindie_status" in tool_names
-    assert not any(name.startswith("knowledge_") for name in tool_names)
+    assert {
+        "mindie_status",
+        "knowledge_query",
+        "knowledge_explain",
+        "knowledge_feedback",
+        "knowledge_distill",
+        "knowledge_sync",
+    } <= tool_names
 
     assert rsi_loop.__name__.startswith("mindie_harness.rsi")
     assert experiment_ledger.__name__.startswith("mindie_harness.rsi")
@@ -213,12 +221,32 @@ def test_symlinked_metadata_and_diagnostics_supported_ad07(tmp_path: Path):
     assert ver == "0.5.6"
 
 
-def test_skill_and_domain_docs_free_of_benchmark_spillover_ad10():
-    skill_text = (PLUGIN_ROOT / "skills" / "mindie-agent" / "SKILL.md").read_text(encoding="utf-8")
-    domain_text = (PLUGIN_ROOT / "skills" / "mindie-agent" / "references" / "domain-skills.md").read_text(encoding="utf-8")
-    for forbidden in ("(out_tensor, metrics_dict)", "mindie-bench-ablation/1", "experiment_ledger.py", "PROGRESS.md"):
-        assert forbidden not in skill_text, f"Benchmark spillover {forbidden!r} found in SKILL.md"
-        assert forbidden not in domain_text, f"Benchmark spillover {forbidden!r} found in domain-skills.md"
+def test_skill_and_domain_docs_free_of_benchmark_and_install_spillover_ad10():
+    skills_dir = PLUGIN_ROOT / "skills"
+    skill_path = skills_dir / "mindie-agent" / "SKILL.md"
+    skill_text = skill_path.read_text(encoding="utf-8")
+    assert len(skill_text.splitlines()) < 35, "SKILL.md must stay concise (< 35 lines)"
+
+    relocated_install_docs = ("workspace-setup.md", "github-authentication.md", "user-notice.md")
+    for doc_name in relocated_install_docs:
+        assert not list(skills_dir.rglob(doc_name)), f"Installer doc {doc_name} must not live under skills/"
+        assert (REPO_ROOT / "docs" / "install" / doc_name).is_file(), f"Missing docs/install/{doc_name}"
+
+    forbidden_terms = (
+        "(out_tensor, metrics_dict)",
+        "mindie-bench-ablation/1",
+        "experiment_ledger.py",
+        "PROGRESS.md",
+        "setup.py sharing",
+        "vllm-ascend-workspace",
+        "github-authentication.md",
+        "workspace-setup.md",
+        "user-notice.md",
+    )
+    for md_file in sorted(skills_dir.rglob("*.md")):
+        content = md_file.read_text(encoding="utf-8")
+        for forbidden in forbidden_terms:
+            assert forbidden not in content, f"Forbidden spillover {forbidden!r} found in {md_file.relative_to(REPO_ROOT)}"
 
 
 def test_pr_checklist_host_plugin_profile():

@@ -19,7 +19,7 @@ code/
 ## 2. Non-Negotiable Host-Plugin Contracts
 
 1. **Frozen Root `hooks.json`**: `plugins/mindie-agent/hooks.json` must stay byte-for-byte identical (`979` bytes, `sha256 == 33b564c78b439205fd4acfe095c83b15770043ff462d636e2a89f14620cdfc3f`).
-2. **Passive Default & `< 100ms` Inactive `Stop` (`P2.1` / `P2.2`)**: Unactivated `Stop` hooks must return `{}` in `< 100ms` with zero network I/O, zero builds, and zero transcript reads; public MCP `tools/list` must never expose `knowledge_*`.
+2. **Default-Enabled Capabilities & `< 100ms` Sharing-Disabled `Stop`**: Enabling the plugin activates `mindie-remote-dev` and `mindie-tools` (including `knowledge_*` tools; `/mindie-agent deactivate` mutes a conversation); unconfigured or sharing-disabled `Stop` hooks must return `{}` in `< 100ms` with zero network I/O, zero `admission.sqlite3` creation, and zero transcript reads.
 3. **Zero Pre-Call Binding on Deterministic Tools (`P2.7`)**: `mindie-remote-dev` and `mindie-tools` must succeed on standard MCP `tools/call` without `_meta`, `PreToolUse` binds, or `AGY_CONVERSATION_ID`.
 4. **Windows Zero-Popup & Unix LF**: Every Windows subprocess call must include `CREATE_NO_WINDOW` (never `DETACHED_PROCESS` or `CREATE_NEW_CONSOLE`), and all tracked text files must use Unix `LF` (`\n`) line endings.
 

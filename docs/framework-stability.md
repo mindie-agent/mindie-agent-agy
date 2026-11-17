@@ -8,7 +8,7 @@
 
 - **`SessionStart`**: Always returns `{}` without starting background workers or syncing feeds.
 - **Ordinary `PreInvocation`**: Immediately returns `{}` when `lastUserInput` does not invoke `/mindie-agent`.
-- **Unactivated `Stop`**: Immediately returns `{}` when `Admission.knowledge_lease(conversationId)` is `None`, without reading `mindie-community.json` or the transcript file.
+- **Sharing-Disabled `Stop`**: Immediately returns `{}` in `< 100ms` when unconfigured or community sharing is disabled (`sharing_enabled == False`), without creating `admission.sqlite3` or reading the transcript file.
 
 ## 2. Atomic File Replacement & SQLite WAL Discipline
 

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/mindie-agent/mindie-agent-agy/releases"><img src="https://img.shields.io/badge/release-v0.1.18-0F766E.svg" alt="Release v0.1.18"></a>
+  <a href="https://github.com/mindie-agent/mindie-agent-agy/releases"><img src="https://img.shields.io/badge/release-v0.1.19-0F766E.svg" alt="Release v0.1.19"></a>
   <a href="harness-compatibility.json"><img src="https://img.shields.io/badge/Antigravity-2.0.0_%E2%80%93_2.99.99-4285F4.svg" alt="Antigravity 2.0.0 - 2.99.99"></a>
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.13-3776AB.svg" alt="Python 3.13"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-0F766E.svg" alt="License: MIT"></a>
@@ -27,32 +27,32 @@
 
 ---
 
-**MindIE Agent for Google Antigravity** (`mindie-agent-agy`) is the native Google Antigravity (`agy`) plugin for [MindIE Agent](https://github.com/mindie-agent/mindie-agent), supporting the **Ascend NPU AI Infra design, development, and testing lifecycle**. Release `v0.1.18` (paired with `mindie-agent 0.1.13`) delivers three core capabilities: **local and community knowledge base retrieval with privacy redaction** (focused on `vLLM-Ascend` feature development and `AscendC` / `Triton` kernel engineering), **remote SSH / Docker development and NPU inspection**, and **unified fault diagnostics with sanitized reporting**; additional Ascend software domains are tracked on the project roadmap.
+**MindIE Agent for Google Antigravity** (`mindie-agent-agy`) is the native Google Antigravity (`agy`) plugin for [MindIE Agent](https://github.com/mindie-agent/mindie-agent), supporting the **Ascend NPU AI Infra design, development, and testing lifecycle**. Release `v0.1.19` (paired with `mindie-agent 0.1.13`) delivers three core capabilities: **local and community knowledge base retrieval with privacy redaction** (focused on `vLLM-Ascend` feature development and `AscendC` / `Triton` kernel engineering), **remote SSH / Docker development and NPU inspection**, and **unified fault diagnostics with sanitized reporting**; additional Ascend software domains are tracked on the project roadmap.
 
-Designed around the [MindIE Agent Engineering Design Principles](https://github.com/mindie-agent/mindie-agent/blob/main/docs/design-principles.en.md), **domain knowledge and the Skill system are invoked manually on demand via `/mindie-agent`** so they never interfere with unrelated tasks, while **`mindie-remote-dev` remote NPU development and testing tools trigger automatically by default** in everyday conversation—enforcing Receipt Honesty and strict timeout arithmetic without silent fallbacks or blind retries.
+Designed around the [MindIE Agent Engineering Design Principles](https://github.com/mindie-agent/mindie-agent/blob/main/docs/design-principles.en.md), because Google Antigravity toggles plugins as an atomic bundle and auto-routes `SKILL.md` semantically, **enabling the `mindie-agent` plugin activates all capabilities by default (`mindie-remote-dev`, `mindie-tools` including `knowledge_*` tools, the `mindie-agent` Skill, and opt-in `Stop` capture when community sharing is enabled) with no `/mindie-agent` prefix required** (`/mindie-agent deactivate` optionally mutes knowledge and capture for a conversation)—enforcing Receipt Honesty and strict timeout arithmetic without silent fallbacks or blind retries.
 
 ---
 
 ## Why Use This Plugin? (Trigger Modes & Usage Examples)
 
-MindIE Agent combines **manual on-demand activation for domain knowledge & skills** with **default automatic triggering for remote NPU development & testing**:
+Once the `mindie-agent` plugin is enabled in Antigravity, **all engineering, diagnostic, and graded knowledge capabilities work automatically by default**:
 
 | Capability | Trigger Mode | When to Use | How to Use |
 | :--- | :--- | :--- | :--- |
-| **Experience, Knowledge & Skill System**<br/>(`mindie-knowledge` + `mindie-agent` Skill) | **🎯 Manual Per-Session Trigger** | When designing Ascend AI Infra features, developing in `vLLM-Ascend`, writing `AscendC` / `Triton` kernels, authoring unit/accuracy tests, or tuning performance | Explicitly type **`/mindie-agent` + your task description** once in the current conversation to enable knowledge search, feedback, distillation, and sync across subsequent turns (`/mindie-agent deactivate` turns it off for the conversation) |
-| **Remote Ascend NPU Dev & Testing**<br/>(`mindie-remote-dev` MCP toolset) | **⚡ Default Auto-Trigger** | When syncing local code/tests to a remote Ascend server/container, running NPU builds/tests, checking `npu-smi`, or streaming long job logs | **No `/mindie-agent` command needed**—just describe the remote task in natural language |
-| **Profiling, Simulation, Coordination & Local Diagnostics**<br/>(`mindie-tools` MCP toolset) | **Discoverable by default** | Use installed `profiler`, `sim`, and `coordinator` components, inspect local diagnostics, or export a support bundle | Call `mindie_status`, `profiler`, `sim`, `coordinator`, `diagnostics_status`, or `diagnostics_bundle` without knowledge activation |
-| **Engineering Experience Loop**<br/>(`Stop` Auto-Capture + Gitleaks Redaction) | **🔄 Background Run in Enabled Sessions** | When contributing sanitized design, kernel development, testing, or tuning takeaways back to the open-source knowledge base | **Configure Consent Once, Active in `/mindie-agent` Sessions**—once contribution is enabled in setup, every `/mindie-agent`-enabled conversation is automatically redacted and packaged into a knowledge PR in the background; unactivated conversations perform zero `Stop` capture |
+| **Experience, Knowledge & Skill System**<br/>(`mindie-tools` `knowledge_*` + `mindie-agent` Skill) | **⚡ Default-Enabled When Plugin Is On** | When designing Ascend AI Infra features, developing in `vLLM-Ascend` / `xLLM` / `MindIE-SD`, writing `AscendC` / `Triton` kernels, authoring accuracy tests, or tuning performance | **No `/mindie-agent` prefix needed**—just describe your Ascend task in natural language and the Agent invokes `knowledge_query` / `knowledge_explain` / `knowledge_distill` directly (`/mindie-agent deactivate` mutes a conversation; `/mindie-agent` re-enables it) |
+| **Remote Ascend NPU Dev & Testing**<br/>(`mindie-remote-dev` MCP toolset) | **⚡ Default Auto-Trigger** | When syncing local code/tests to a remote Ascend server/container, running NPU builds/tests, checking `npu-smi`, or streaming long job logs | **No prefix command needed**—just describe the remote task in natural language |
+| **Profiling, Simulation, Triage & Coordination**<br/>(`mindie-tools` MCP toolset) | **⚡ Discoverable by Default** | Use installed `debugger`, `profiler`, `sim`, `coordinator`, and `npu_top` components, inspect local diagnostics, or export a support bundle | Call `mindie_status`, `debugger`, `profiler`, `sim`, `coordinator`, `npu_top`, `diagnostics_status`, or `diagnostics_bundle` directly |
+| **Engineering Experience Loop**<br/>(`Stop` Auto-Capture + Gitleaks Redaction) | **🔄 Default Background Run When Sharing Is Enabled** | When contributing sanitized design, kernel development, testing, or tuning takeaways back to the open-source knowledge base | **Off by default**; once community sharing is enabled, every non-muted in-scope conversation is automatically redacted with Gitleaks and packaged into a knowledge PR on `Stop` (when sharing is off, `Stop` returns `{}` in `< 100ms`) |
 
-Default public MCP discovery (`mindie-remote-dev` and `mindie-tools`) excludes all `knowledge_*` tool names, descriptions, and schemas. After manual activation via `/mindie-agent`, `PreInvocation` records a session lease for the active `conversationId` in `admission.sqlite3`, and the Skill accesses private knowledge operations through [`knowledge_cli.py`](plugins/mindie-agent/scripts/knowledge_cli.py). Subagents receive distinct `conversationId` values and never inherit the parent conversation's knowledge lease.
+While the plugin is enabled, the `mindie-tools` MCP server exposes `knowledge_query`, `knowledge_explain`, `knowledge_feedback`, `knowledge_distill`, and `knowledge_sync` out of the box without requiring any pre-binding or `/mindie-agent` activation gesture. Sending `/mindie-agent deactivate` records an explicit muted lease for that `conversationId` in `admission.sqlite3` without affecting other conversations or subagents.
 
-### Scenario 1: Type `/mindie-agent` for Feature Design, Kernel Development & Test Authoring (Manual Trigger)
+### Scenario 1: Natural-Language Feature Design, Kernel Development & Test Authoring (Default Auto-Trigger)
 > **The Problem**: Designing new Ascend features, implementing `AscendC` / `Triton` operators, or writing `vLLM-Ascend` accuracy tests often requires domain-specific architecture conventions, kernel constraints, and verified test patterns.  
-> **Copy-Paste Example**:
+> **Copy-Paste Example (no slash command required)**:
 > ```text
-> /mindie-agent I want to design and implement a custom fused operator in vllm-ascend (with Triton / AscendC kernel support) and add unit + accuracy tests. Please check past experience and architecture conventions to propose an implementation plan.
+> I want to design and implement a custom fused operator in vllm-ascend (with Triton / AscendC kernel support) and add unit + accuracy tests. Please check past experience and architecture conventions to propose an implementation plan.
 > ```
-> **What Happens**: Typing `/mindie-agent` activates the session lease in `PreInvocation`, injects an ephemeral guidance step, activates the `mindie-agent` Skill, and searches locally synced [`knowledge-vllm-ascend`](https://github.com/mindie-agent/knowledge-vllm-ascend) packages using BM25 and block-citation retrieval—returning verified engineering cases with **applicable versions, evidence, and known caveats**.
+> **What Happens**: Antigravity matches the runtime `mindie-agent` Skill and invokes `knowledge_query` -> `knowledge_explain` on `mindie-tools` MCP to search locally synced [`knowledge-vllm-ascend`](https://github.com/mindie-agent/knowledge-vllm-ascend) `L1–L4` graded units—returning verified engineering cases with **applicable conditions, evidence, and known caveats**.
 
 ### Scenario 2: Everyday Conversation Automatically Triggers Remote Ascend NPU Dev & Testing (`mindie-remote-dev` Default Auto-Trigger)
 > **The Problem**: You code on a Windows or macOS workstation while the Ascend NPU environment lives on a remote Linux server or container. Manually syncing code, compiling kernels, and watching long test runs slows down every iteration.  
@@ -66,12 +66,12 @@ Default public MCP discovery (`mindie-remote-dev` and `mindie-tools`) excludes a
 > **The Problem**: Hard-won design, kernel implementation, testing, or tuning insights usually vanish when a session ends, yet sharing raw transcripts risks exposing internal IPs, keys, model chain-of-thought (`thinking`), or private paths.  
 > **Copy-Paste Example (just work on your engineering task normally)**:
 > ```text
-> /mindie-agent Help me complete the build and accuracy alignment verification for this custom Ascend operator using the knowledge base and our remote NPU container, and run the unit test suite.
+> Help me complete the build and accuracy alignment verification for this custom Ascend operator using the knowledge base and our remote NPU container, and run the unit test suite.
 > ```
-> **What Happens**: Community sharing is **off by default**. Once you opt in, your saved consent persists across sessions; in any conversation where you have invoked `/mindie-agent`, every turn end (`Stop`) locates `<appDataDir>/brain/<conversationId>/.system_generated/logs/transcript_full.jsonl`, extracts public user/assistant messages from activation onward (strictly excluding `thinking`, `tool_calls`, and `<ADDITIONAL_METADATA>` tags), redacts secrets locally with deterministic rules and Gitleaks, generates block navigation summaries, and opens a sanitized GitHub PR. Ordinary conversations where `/mindie-agent` was not invoked short-circuit on `Stop` and return `{}` immediately without reading sharing settings or transcripts, and `Stop` never returns `{"decision": "continue"}`.
+> **What Happens**: Community sharing is **off by default** (when disabled, `Stop` short-circuits in `< 100ms` in pure stdlib without creating `admission.sqlite3` or reading transcripts, and `Stop` never returns `{"decision": "continue"}`). Once you opt in, your saved consent persists across sessions; for any non-muted conversation inside an approved workspace, every turn end (`Stop`) locates `<appDataDir>/brain/<conversationId>/.system_generated/logs/transcript_full.jsonl`, extracts public user/assistant messages (strictly excluding `thinking`, `tool_calls`, and `<ADDITIONAL_METADATA>` tags), redacts secrets locally with deterministic rules and Gitleaks, and prepares a sanitized GitHub PR (`/mindie-agent deactivate` mutes sensitive conversations at any time).
 > - **Unified Contribution Switch (`~/.config/mindie-agent/mindie-consent.json`)**: Community knowledge sharing and automatic tool fault reporting share a single persistent authority (`mindie-consent/1`) alongside `mindie-community-config/1`.
-> - Read the **[Contribution Notice / 用户须知](plugins/mindie-agent/skills/mindie-agent/references/user-notice.md)** for full details on visible-message filtering, redaction limits, and public Git history.
-> - For an optional multi-task Git worktree layout for `vllm` and `vllm-ascend`, see **[Workspace Setup](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md)** and [vllm-ascend-workspace](https://github.com/mindie-agent/vllm-ascend-workspace).
+> - Read the **[Contribution Notice / 用户须知](docs/install/user-notice.md)** for full details on visible-message filtering, redaction limits, and public Git history.
+> - For an optional multi-task Git worktree layout for `vllm` and `vllm-ascend`, see **[Workspace Setup](docs/install/workspace-setup.md)** and [vllm-ascend-workspace](https://github.com/mindie-agent/vllm-ascend-workspace).
 
 ---
 
@@ -120,7 +120,7 @@ If you are an AI Agent asked by the user to install this plugin, execute the fol
    export GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never UV_SYSTEM_CERTS=true UV_NATIVE_TLS=true
    GH_USER=$(gh api --hostname github.com user --jq .login) && echo "GitHub channel verified for account: $GH_USER"
    ```
-   - **Hard Gate (Never skip or silently ignore)**: If `gh` is missing or unauthenticated, follow [GitHub Sign-In](plugins/mindie-agent/skills/mindie-agent/references/github-authentication.md) first.
+   - **Hard Gate (Never skip or silently ignore)**: If `gh` is missing or unauthenticated, follow [GitHub Sign-In](docs/install/github-authentication.md) first.
    - On Windows PowerShell, append the same way and skip keys that already exist. These variables apply only to the current process and its children:
      ```powershell
      function Add-MindieGitConfig([string]$Key, [string]$Value) {
@@ -200,7 +200,7 @@ If you are an AI Agent asked by the user to install this plugin, execute the fol
      ```sh
      uv run --no-project --python 3.13 python "$PLUGIN_ROOT/scripts/setup.py" sharing --status
      ```
-   - Briefly present the [Contribution Notice](plugins/mindie-agent/skills/mindie-agent/references/user-notice.md) (local Gitleaks dual-layer redaction, sanitized PRs to the public knowledge repo and fault Issues to the main repo, and a single `mindie-consent.json` switch that can be disabled anytime), then **immediately call Antigravity's native `ask_question` tool** (`is_multi_select: false`, first option prefixed with `(Recommended)`; fall back to a numbered list card only if `ask_question` is unavailable) with these 3 questions:
+   - Briefly present the [Contribution Notice](docs/install/user-notice.md) (local Gitleaks dual-layer redaction, sanitized PRs to the public knowledge repo and fault Issues to the main repo, and a single `mindie-consent.json` switch that can be disabled anytime), then **immediately call Antigravity's native `ask_question` tool** (`is_multi_select: false`, first option prefixed with `(Recommended)`; fall back to a numbered list card only if `ask_question` is unavailable) with these 3 questions:
      ```json
      {
        "questions": [
@@ -233,7 +233,7 @@ If you are an AI Agent asked by the user to install this plugin, execute the fol
      }
      ```
    - **Apply the user's choices in strict order (never enable sharing or star without explicit user consent)**:
-     1. **Resolve / initialize the workspace first (`WORKSPACE_ROOT`)**: Follow [Workspace Setup](plugins/mindie-agent/skills/mindie-agent/references/workspace-setup.md) for Question 1 to determine the target absolute path `WORKSPACE_ROOT`.
+     1. **Resolve / initialize the workspace first (`WORKSPACE_ROOT`)**: Follow [Workspace Setup](docs/install/workspace-setup.md) for Question 1 to determine the target absolute path `WORKSPACE_ROOT`.
      2. **Persist the community sharing & fault reporting choice**:
         - If the user chose to enable sharing in Question 2:
           ```sh
@@ -254,14 +254,14 @@ If you are an AI Agent asked by the user to install this plugin, execute the fol
 
 ## Everyday Usage & Operator Commands (Unified `/mindie-agent` Entry)
 
-MindIE Agent routes interactive commands through **a single unified entrypoint: `/mindie-agent`**. Operational context is progressively disclosed to the Agent only when needed:
+While the plugin is enabled, everyday Ascend engineering tasks work in natural language with zero slash-command ceremony; `/mindie-agent` provides optional session status and per-conversation muting:
 
 | Scenario | What You Type | What Happens Behind the Scenes |
 |---|---|---|
-| **Ascend AI Infra Design, Dev (`vLLM-Ascend` / `AscendC` / `Triton`), Testing & Tuning** | `/mindie-agent <describe your design, development, or testing task>` | `PreInvocation` activates the session lease for the current `conversationId`, unlocking Ascend Skill guidance and private `knowledge_cli.py` search alongside `mindie-remote-dev` |
-| **First-Time Setup, Checking Status, or Changing Sharing Settings** | `/mindie-agent` with natural language (e.g., `/mindie-agent check status`, `/mindie-agent enable/disable community sharing`) | Your Agent loads the relevant secondary reference context on demand and runs `setup.py` / `knowledge_cli.py`; saved preferences persist across sessions |
-| **Deactivating the Current Session Lease** | `/mindie-agent deactivate` | Immediately revokes the lease for the current `conversationId` in `admission.sqlite3` |
-| **Everyday Remote Ascend Server / Container Work** | **No prefix command needed**—just use natural language | Always-on `mindie-remote-dev` MCP tools trigger automatically to read/edit remote files, apply patches, and stream background job logs |
+| **Ascend AI Infra Design, Dev (`vLLM-Ascend` / `AscendC` / `Triton`), Testing & Tuning** | **No prefix command needed**—just describe your design, development, or testing task | Antigravity routes the runtime `mindie-agent` Skill and invokes `knowledge_*`, `debugger`, `profiler`, `sim`, and `coordinator` on `mindie-tools` MCP alongside `mindie-remote-dev` |
+| **Inspecting Session & Sharing Status** | `/mindie-agent status` (or call `mindie_status` MCP tool) | Read-only check returning session activation state, `agy.json` binding, community sharing consent, and diagnostics status |
+| **Muting Knowledge & `Stop` Capture in Current Conversation** | `/mindie-agent deactivate` | Marks the current `conversationId` as muted (`enabled = 0`) in `admission.sqlite3`; deterministic tools remain available (`/mindie-agent` re-enables it) |
+| **Changing Community Sharing Settings** | Ask your Agent to run `setup.py sharing --enable/--disable` (see `docs/install/`) | Updates `mindie-consent.json` and `mindie-community.json`; saved preferences persist across sessions |
 
 ---
 
@@ -281,7 +281,7 @@ flowchart LR
 | Repository / Component | Responsibility |
 |---|---|
 | [`mindie-agent/mindie-agent`](https://github.com/mindie-agent/mindie-agent) | Top-level architecture, MindIE Agent Engineering Design Principles, domain boundaries, and paired-release governance. |
-| `mindie-agent/mindie-agent-agy` (this repo) | Google Antigravity native plugin bundle (`plugins/mindie-agent/`), `PreInvocation` manual session gate, `PreToolUse` one-shot call binding, `transcript_full.jsonl` public transcript parser, and isolated summary/distillation worker. |
+| `mindie-agent/mindie-agent-agy` (this repo) | Google Antigravity native plugin bundle (`plugins/mindie-agent/`), default-enabled `mindie-tools` MCP catalog (including `knowledge_*`), optional `/mindie-agent deactivate` conversation mute, `PreToolUse` one-shot call binding, `transcript_full.jsonl` public transcript parser, and isolated summary/distillation worker. |
 | [`mindie-agent/knowledge`](https://github.com/mindie-agent/knowledge) | Shared knowledge core: `L1–L4` graded retrieval, deterministic redaction, capture queue, C6 experience distillation, and GitHub PR publication reconciliation. |
 | [`mindie-agent/remote-dev`](https://github.com/mindie-agent/remote-dev) | Editor-semantics remote file operations, patching, managed background jobs, and live log polling over SSH for Ascend servers (with native Antigravity tool and parameter aliases). |
 | [`mindie-agent/profiler`](https://github.com/mindie-agent/profiler) | Standalone Ascend NPU performance collection, kernel/comm breakdown, and cross-run comparison CLI (`mindie-profiler`). |
