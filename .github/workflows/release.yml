@@ -15,13 +15,14 @@ jobs:
     secrets:
       MINDIE_RELEASE_DEPLOY_KEY: ${{ secrets.MINDIE_RELEASE_DEPLOY_KEY }}
     with:
-      release-notes-path: docs/releases/mindie-agent-agy-0.1.17.md
+      release-notes-path: docs/releases/mindie-agent-agy-0.1.18.md
       version-files: |
         pyproject.toml
         plugins/mindie-agent/plugin.json
       setup-command: |
         uv sync --all-extras --no-install-project
       test-command: |
+        git fetch --no-tags --depth=1 origin refs/tags/v0.1.6:refs/tags/v0.1.6 refs/tags/v0.1.16:refs/tags/v0.1.16
         .venv/bin/python .github/scripts/check_lf_eol.py
         .venv/bin/python -m pytest -q -m "not live_npu"
       build-command: |
