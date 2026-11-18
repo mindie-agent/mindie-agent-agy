@@ -39,7 +39,6 @@ SESSION_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
 )
 FALLBACK_SESSION_RE = re.compile(r"^(?:agy-cli-default|agy-mcp-[A-Za-z0-9_.:-]{1,96})\Z")
-GESTURE_RE = re.compile(r"^\s*(?:/mindie-agent|\$mindie-agent(?::mindie-agent)?)(?=\s|$)")
 MCP_EAGER_RE = re.compile(
     r"^mcp_(?:mindie[-_]agent[-_])?(mindie[-_]remote[-_]dev|mindie[-_]tools)_([A-Za-z0-9_.]+)\Z"
 )
@@ -102,20 +101,6 @@ def transcript_from_hook(event: dict) -> str | None:
     if isinstance(value, str) and os.path.isabs(value):
         return str(Path(value))
     return None
-
-
-def parse_mindie_gesture(event: dict) -> tuple[bool, str]:
-    """Return `(is_gesture, subcommand_or_body)` from `lastUserInput`."""
-    prompt = event.get("lastUserInput")
-    if not isinstance(prompt, str):
-        prompt = event.get("prompt")
-    if not isinstance(prompt, str):
-        return False, ""
-    match = GESTURE_RE.match(prompt)
-    if match is None:
-        return False, ""
-    remainder = prompt[match.end():].strip()
-    return True, remainder
 
 
 def parse_agy_mcp_tool(tool_call: dict) -> tuple[str, str, dict] | None:

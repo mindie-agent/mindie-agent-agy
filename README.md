@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/mindie-agent/mindie-agent-agy/releases"><img src="https://img.shields.io/badge/release-v0.1.19-0F766E.svg" alt="Release v0.1.19"></a>
+  <a href="https://github.com/mindie-agent/mindie-agent-agy/releases"><img src="https://img.shields.io/badge/release-v0.1.20-0F766E.svg" alt="Release v0.1.20"></a>
   <a href="harness-compatibility.json"><img src="https://img.shields.io/badge/Antigravity-2.0.0_%E2%80%93_2.99.99-4285F4.svg" alt="Antigravity 2.0.0 - 2.99.99"></a>
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.13-3776AB.svg" alt="Python 3.13"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-0F766E.svg" alt="License: MIT"></a>
@@ -20,31 +20,31 @@
   <b>中文</b> | <a href="README.en.md">English</a> ·
   <a href="#快速开始交给-agent-一句话自动安装">快速开始</a> ·
   <a href="#装上之后能做什么触发方式与使用示例">应用场景</a> ·
-  <a href="#日常使用与管理命令默认自动就绪--mindie-agent-会话控制">命令参考</a> ·
+  <a href="#日常使用与控制面操作默认全静默运行">日常使用</a> ·
   <a href="#架构与组件边界">系统架构</a> ·
   <a href="docs/README.md">技术文档</a>
 </p>
 
 ---
 
-**MindIE Agent for Google Antigravity**（`mindie-agent-agy`）是 [MindIE Agent](https://github.com/mindie-agent/mindie-agent) 面向 Google Antigravity（`agy`）的原生插件，服务于**昇腾（Ascend）NPU 上的 AI Infra 设计、开发与测试全流程**。当前 `v0.1.19`（配套主产品 `0.1.13`）已交付三大核心能力：**本地与社区知识库检索及隐私脱敏**（优先覆盖 `vLLM-Ascend` 特性开发与 `AscendC` / `Triton` 算子工程）、**远端 SSH / Docker 开发与 NPU 状态巡检**，以及**统一故障诊断与脱敏上报**；更多昇腾基础软件领域将随演进路线图持续扩展。
+**MindIE Agent for Google Antigravity**（`mindie-agent-agy`）是 [MindIE Agent](https://github.com/mindie-agent/mindie-agent) 面向 Google Antigravity（`agy`）的原生插件，服务于**昇腾（Ascend）NPU 上的 AI Infra 设计、开发与测试全流程**。当前 `v0.1.20`（配套主产品 `0.1.13`）已交付三大核心能力：**本地与社区知识库检索及隐私脱敏**（优先覆盖 `vLLM-Ascend` 特性开发与 `AscendC` / `Triton` 算子工程）、**远端 SSH / Docker 开发与 NPU 状态巡检**，以及**统一故障诊断与脱敏上报**；更多昇腾基础软件领域将随演进路线图持续扩展。
 
-项目设计严格遵循 [MindIE Agent 工程设计原则](https://github.com/mindie-agent/mindie-agent/blob/main/docs/design-principles.md)：由于 Google Antigravity 以插件为单位原子启停且自动语义触发 `SKILL.md`，**插件启用后全部核心能力（`mindie-remote-dev`、`mindie-tools` 含 `knowledge_*` 知识工具、`mindie-agent` Skill，以及显式开启共享授权后的 `Stop` 经验沉淀）默认开箱可用，无需手动输入 `/mindie-agent` 前缀**（如需在单会话内静音知识与采集，可输入 `/mindie-agent deactivate`）；所有状态与报错真实可定位，遵守回执诚实性（Receipt Honesty）与超时算术不变量，不做静默降级或盲目重试。
+项目设计严格遵循 [MindIE Agent 工程设计原则](https://github.com/mindie-agent/mindie-agent/blob/main/docs/design-principles.md)：由于 Google Antigravity 以插件为单位原子启停且自动语义触发 `SKILL.md`，**插件启用后全部核心能力（`mindie-remote-dev`、`mindie-tools` 含 `knowledge_*` 知识工具、`mindie-agent` Skill，以及显式开启共享授权后的 `Stop` 经验沉淀）默认全静默开箱可用，不向用户暴露任何斜杠命令（`SKILL.md` 启用 `disable-slash-command: true`）**；所有状态与报错真实可定位，遵守回执诚实性（Receipt Honesty）与超时算术不变量，不做静默降级或盲目重试。
 
 ---
 
 ## 装上之后能做什么？（触发方式与使用示例）
 
-启用 `mindie-agent` 插件后，**全量研发、诊断与领域知识能力默认自动就绪**：
+启用 `mindie-agent` 插件后，**全量研发、诊断与领域知识能力默认静默就绪**：
 
 | 能力模块 | 触发方式 | 什么时候用？ | 怎么用？ |
 | :--- | :--- | :--- | :--- |
-| **经验、知识库与 Skill 系统**<br/>（`mindie-tools` `knowledge_*` + `mindie-agent` Skill） | **⚡ 插件启用即默认可用** | 开展昇腾 AI Infra 架构设计、`vLLM-Ascend` / `xLLM` / `MindIE-SD` 开发、`AscendC` / `Triton` 算子实现、单测/精度验证、性能调优或问题定位时 | **无需输入 `/mindie-agent`**，直接用自然语言描述昇腾研发需求即可自动路由 `SKILL.md` 并调用 `knowledge_query` / `knowledge_explain` / `knowledge_distill`（输入 `/mindie-agent deactivate` 可在当前会话静音，`/mindie-agent` 重新恢复） |
+| **经验、知识库与 Skill 系统**<br/>（`mindie-tools` `knowledge_*` + `mindie-agent` Skill） | **⚡ 插件启用即静默可用** | 开展昇腾 AI Infra 架构设计、`vLLM-Ascend` / `xLLM` / `MindIE-SD` 开发、`AscendC` / `Triton` 算子实现、单测/精度验证、性能调优或问题定位时 | **无需任何斜杠命令**，直接用自然语言描述昇腾研发需求即可自动语义加载 `SKILL.md` 并调用 `knowledge_query` / `knowledge_explain` / `knowledge_distill` |
 | **远端昇腾 NPU 开发与测试**<br/>（`mindie-remote-dev` MCP 工具集） | **⚡ 默认自动触发** | 日常需要将本地代码或测试同步到远端昇腾服务器/容器、在 NPU 上跑编译/测试、查看 `npu-smi` 或实时轮询长日志时 | **无需前置命令**，直接用自然语言描述远端操作即可 |
 | **Profiling、仿真、故障分诊与资源协调**<br/>（`mindie-tools` MCP 工具集） | **⚡ 默认可发现** | 调用已安装的 `debugger`、`profiler`、`sim`、`coordinator`、`npu_top`，或查看本地 `diagnostics`、导出诊断包 | 直接调用 `mindie_status`、`debugger`、`profiler`、`sim`、`coordinator`、`npu_top`、`diagnostics_status`、`diagnostics_bundle` |
-| **研发经验沉淀与社区共建**<br/>（`Stop` 后台采集 + Gitleaks 脱敏） | **🔄 开启共享授权后默认后台运行** | 希望将有价值的架构设计、算子开发、测试验证或调优经验脱敏沉淀回开源知识库时 | **社区共享默认关闭**；显式开启授权后，作用域内未静音的会话在回合结束自动完成本地 Gitleaks 脱敏与知识 PR 整理；未开启共享时 `Stop` 在 `< 100ms` 内直接返回 `{}` |
+| **研发经验沉淀与社区共建**<br/>（`Stop` 后台采集 + Gitleaks 脱敏） | **🔄 开启共享授权后默认后台运行** | 希望将有价值的架构设计、算子开发、测试验证或调优经验脱敏沉淀回开源知识库时 | **社区共享默认关闭**；显式开启授权后，授权工作区内的会话在回合结束自动完成本地 Gitleaks 脱敏与知识 PR 整理；未开启共享或不在授权工作区时 `Stop` 在 `< 100ms` 内直接返回 `{}` |
 
-启用插件后，`mindie-tools` MCP 服务默认公开 `knowledge_query`、`knowledge_explain`、`knowledge_feedback`、`knowledge_distill` 与 `knowledge_sync` 五个分级知识工具，无需任何预绑定或 `/mindie-agent` 激活步骤即可直接调用；当用户在某个 `conversationId` 中显式发送 `/mindie-agent deactivate` 时，`admission.sqlite3` 仅将该会话标记为静音（子代理与其他会话拥有独立 `conversationId`，互不干扰）。
+启用插件后，`mindie-tools` MCP 服务默认公开 `knowledge_query`、`knowledge_explain`、`knowledge_feedback`、`knowledge_distill` 与 `knowledge_sync` 五个分级知识工具，无需任何预绑定或斜杠激活步骤即可直接调用；每个会话与子代理均拥有独立的 `conversationId` 租约作用域，互不干扰。
 
 ### 场景 1：自然语言直接唤醒知识库与 Skill 辅助设计、开发与测试（默认自动触发）
 > **痛点**：在昇腾上设计新特性、开发 `AscendC` / `Triton` 算子或编写 `vLLM-Ascend` 测试时，在海量文档和 Issue 里翻找架构规范、算子约束与适用条件非常耗时。  
@@ -68,7 +68,7 @@
 > ```text
 > 帮我结合知识库和远端 NPU 容器完成当前 vllm-ascend 自定义算子的编译与精度对齐验证，并跑通对应的单测。
 > ```
-> **会发生什么**：社区贡献**默认关闭**（未开启共享时 `Stop` Hook 纯标准库 `< 100ms` 短路返回 `{}`，不创建 `admission.sqlite3`、不读取对话，且绝不返回 `{"decision": "continue"}`）。当你显式开启社区贡献后，保存的授权配置跨会话持久生效；在授权工作区范围内的默认活跃会话中，每次回合结束（`Stop`）自动定位 `<appDataDir>/brain/<conversationId>/.system_generated/logs/transcript_full.jsonl`，提取公开用户/助手消息（严格剔除 `thinking`、`tool_calls` 与 `<ADDITIONAL_METADATA>` 标签），使用确定性隐私规则与 Gitleaks 本地脱敏并整理知识 PR（对敏感会话可随时输入 `/mindie-agent deactivate` 静音）。
+> **会发生什么**：社区贡献**默认关闭**（未开启共享或不在授权工作区时 `Stop` Hook 在 `< 100ms` 内短路返回 `{}`，不创建 `admission.sqlite3`、不读取对话，且绝不返回 `{"decision": "continue"}`）。当你显式开启社区贡献后，保存的授权配置跨会话持久生效；在授权工作区范围内的会话中，每次回合结束（`Stop`）自动定位 `<appDataDir>/brain/<conversationId>/.system_generated/logs/transcript_full.jsonl`，提取公开用户/助手消息（严格剔除 `thinking`、`tool_calls` 与 `<ADDITIONAL_METADATA>` 标签），使用确定性隐私规则与 Gitleaks 本地脱敏并整理知识 PR（随时可通过关闭插件或运行 `setup.py sharing --disable` 停用采集）。
 > - **统一贡献开关（`~/.config/mindie-agent/mindie-consent.json`）**：社区知识贡献与自动工具故障上报共用同一个持久化开关（`mindie-consent/1`）与共享设置（`mindie-community-config/1`）。
 > - 关于公开消息筛选范围、确定性脱敏边界与公开 Git 历史说明，请参阅 **[用户须知 / Contribution Notice](docs/install/user-notice.md)**。
 > - 如需在本地搭建 `vllm` + `vllm-ascend` 多任务 Git Worktree 协同工作区，可按需参考 **[工作区配置指南](docs/install/workspace-setup.md)** 与 [vllm-ascend-workspace](https://github.com/mindie-agent/vllm-ascend-workspace)。
@@ -251,15 +251,15 @@
 
 ---
 
-## 日常使用与管理命令（默认自动就绪 + `/mindie-agent` 会话控制）
+## 日常使用与控制面操作（默认全静默运行）
 
-启用插件后，日常研发任务直接用自然语言提问即可；`/mindie-agent` 仅用于查看控制面状态或按会话静音/恢复知识与采集：
+启用插件后，日常研发任务直接用自然语言提问即可，聊天输入框 `/` 菜单保持干净不暴露额外命令：
 
-| 使用场景 | 你只需要输入 | 背后自动完成的事 |
+| 使用场景 | 你只需要做什么 | 背后自动完成的事 |
 |---|---|---|
-| **日常昇腾 AI Infra 设计、开发（`vLLM-Ascend` / `AscendC` / `Triton`）、测试与调优** | **无需任何前置命令**，直接描述你的设计、开发或测试需求 | Antigravity 自动路由 `mindie-agent` Skill，直接通过 `mindie-tools` MCP 调用 `knowledge_*`、`debugger`、`profiler`、`sim`、`coordinator` 并配合 `mindie-remote-dev` 完成实机验证 |
-| **查看当前会话控制面与授权状态** | `/mindie-agent status`（或调用 `mindie_status` MCP 工具） | 只读返回当前会话激活状态、`agy.json` 配置、社区共享授权与诊断健康事实（不创建数据库或后台进程） |
-| **在当前会话静音知识检索与 `Stop` 采集** | `/mindie-agent deactivate` | 在 `admission.sqlite3` 中将当前 `conversationId` 标记为静音（`enabled = 0`），屏蔽 `knowledge_*` 与 `Stop` 采集；确定性工具保持可用（发送 `/mindie-agent` 即可重新恢复） |
+| **日常昇腾 AI Infra 设计、开发（`vLLM-Ascend` / `AscendC` / `Triton`）、测试与调优** | **无需任何前置命令**，直接描述你的设计、开发或测试需求 | Antigravity 按任务上下文自动加载 `mindie-agent` Skill，直接通过 `mindie-tools` MCP 调用 `knowledge_*`、`debugger`、`profiler`、`sim`、`coordinator` 并配合 `mindie-remote-dev` 完成实机验证 |
+| **查看当前会话控制面与授权状态** | 让 Agent 调用 `mindie_status` MCP 工具 | 只读返回当前会话状态、`agy.json` 配置、社区共享授权与诊断健康事实（不创建数据库或后台进程） |
+| **整体启停插件能力** | 在 Antigravity 插件管理面板切换 `mindie-agent` 开关 | 插件整体启停全部 MCP 工具、Skill 与后台 Hook |
 | **调整社区经验共享偏好** | 让 Agent 执行 `setup.py sharing --enable/--disable`（参考 `docs/install/`） | 更新 `mindie-consent.json` 与 `mindie-community.json`，保存的选择跨会话持久生效 |
 
 ---
@@ -280,7 +280,7 @@ flowchart LR
 | 仓库 / 组件 | 核心职责 |
 |---|---|
 | [`mindie-agent/mindie-agent`](https://github.com/mindie-agent/mindie-agent) | 顶层架构、MindIE Agent 工程设计原则、领域边界与配套发布规范。 |
-| `mindie-agent/mindie-agent-agy`（本仓库） | Google Antigravity 原生插件包（`plugins/mindie-agent/`）、默认全量 MCP 服务暴露（含 `knowledge_*`）、可选 `/mindie-agent deactivate` 会话静音、`PreToolUse` 单次调用绑定、`transcript_full.jsonl` 公开对话解析与隔离摘要/蒸馏 Worker。 |
+| `mindie-agent/mindie-agent-agy`（本仓库） | Google Antigravity 原生插件包（`plugins/mindie-agent/`）、静默默认全量 MCP 服务暴露（含 `knowledge_*`）、`disable-slash-command: true` 无感 Skill 路由、`PreToolUse` 单次调用绑定、`transcript_full.jsonl` 公开对话解析与隔离摘要/蒸馏 Worker。 |
 | [`mindie-agent/knowledge`](https://github.com/mindie-agent/knowledge) | 共享知识核心：`L1–L4` 分级检索、确定性脱敏、采集队列、C6 自动经验蒸馏与 GitHub PR 发布对账。 |
 | [`mindie-agent/remote-dev`](https://github.com/mindie-agent/remote-dev) | 面向远端昇腾服务器的 SSH 文件读写、补丁同步、受管后台作业与实时日志流（原生内置 Antigravity 工具与参数别名映射）。 |
 | [`mindie-agent/profiler`](https://github.com/mindie-agent/profiler) | 昇腾 NPU 性能采集、算子/通信拆解与跨次对比 CLI（`mindie-profiler`）。 |
@@ -293,7 +293,7 @@ flowchart LR
 
 - **适配器配置文件**：`${XDG_CONFIG_HOME:-$HOME/.config}/mindie-agent/agy.json`（记录解释器、脚本目录与引擎配置路径）。
 - **知识引擎与社区共享配置**：同目录下的 `agy.engine.json`、`mindie-community.json`（`mindie-community-config/1`）与 `mindie-consent.json`（`mindie-consent/1`）。
-- **会话准入与回执数据库**：`state/admission.sqlite3`（会话级 `/mindie-agent` 租约与 `PreToolUse` 30s 单次绑定令牌）与 `state/remote_receipts.sqlite3`（远端调用回执账本）。
+- **会话准入与回执数据库**：`state/admission.sqlite3`（按 `conversationId` 隔离的默认知识租约）、`state/mcp-binds.sqlite3`（`PreToolUse` 120s 单次绑定令牌）与 `state/remote_receipts.sqlite3`（远端调用回执账本）。
 
 ---
 
@@ -313,7 +313,7 @@ python .github/scripts/check_lf_eol.py
 详细设计与验证文档见 [`docs/`](docs/README.md) 目录（提供完整的中英双语版本）：
 
 - **[文档索引（中文）](docs/README.md)** | **[Documentation Index (English)](docs/README.en.md)**
-- **Antigravity Harness 接口兼容性与验证证据**：[中文](docs/harness-interfaces.zh.md) | [English](docs/harness-interfaces.md) — `harness-compatibility.json` 登记接口、插件根目录 `hooks.json` 规范、`PreInvocation` 激活、`PreToolUse` 单次绑定与子代理 `conversationId` 隔离。
+- **Antigravity Harness 接口兼容性与验证证据**：[中文](docs/harness-interfaces.zh.md) | [English](docs/harness-interfaces.md) — `harness-compatibility.json` 登记接口、插件根目录 `hooks.json` 规范、`PreInvocation` 零 I/O 直通、`PreToolUse` 单次绑定与子代理 `conversationId` 隔离。
 - **公开对话采集与本地脱敏**：[中文](docs/public-transcript.zh.md) | [English](docs/public-transcript.md) — Brain `transcript.jsonl` 自动提升至 `transcript_full.jsonl`、`thinking` / `tool_calls` / `<ADDITIONAL_METADATA>` 剥离与隔离摘要生成。
 - **服务身份与统一授权连续性**：[中文](docs/service-continuity.zh.md) | [English](docs/service-continuity.md) — `agy.json` / `agy.engine.json` 绑定、`mindie-community-config/1` 与 `mindie-consent/1` 跨会话持久化。
 - **故障诊断、超时算术与回执诚实性**：[中文](docs/failure-diagnostics.zh.md) | [English](docs/failure-diagnostics.md) — `660s >= 600s + 60s` 超时算术、`receipt_unconfirmed` 远端回执保护、`outcome_unknown` 防重放与有界进程树回收。

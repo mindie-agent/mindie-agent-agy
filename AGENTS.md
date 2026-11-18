@@ -5,9 +5,9 @@
 ## 1. Core Architectural & Contract Rules
 
 - **Frozen Root `hooks.json` Contract**: `plugins/mindie-agent/hooks.json` MUST remain byte-for-byte identical (`979` bytes, `sha256 == 33b564c78b439205fd4acfe095c83b15770043ff462d636e2a89f14620cdfc3f`) at the plugin root (`plugins/mindie-agent/hooks.json`, never `hooks/hooks.json`).
-- **Default-Enabled Capabilities & `< 100ms` Cold/Disabled `Stop`**:
-  - Enabling the `mindie-agent` plugin in Antigravity activates all capabilities by default (`mindie-remote-dev`, `mindie-tools` including `knowledge_*` tools, `mindie-agent` Skill, and opt-in `Stop` capture when community sharing is enabled); `/mindie-agent deactivate` optionally mutes knowledge and `Stop` capture for a single conversation (`/mindie-agent` re-enables).
-  - Unconfigured or sharing-disabled `Stop` (`hook stop` when `agy.json` is absent or `sharing_enabled == False`) MUST return `{}` in `< 100ms` with zero child re-exec, zero network I/O, zero `admission.sqlite3` creation, and zero transcript reads, and `Stop` NEVER emits `"decision": "continue"`.
+- **Silent Default-Enabled Capabilities & `< 100ms` Cold/Disabled `Stop`**:
+  - Enabling the `mindie-agent` plugin in Antigravity silently activates all capabilities by default (`mindie-remote-dev`, `mindie-tools` including `knowledge_*` tools, `mindie-agent` Skill with `disable-slash-command: true` so Antigravity routes it by task context without exposing a `/` slash command, and opt-in `Stop` capture when community sharing is enabled); `PreInvocation` is a pure zero-I/O `{}` pass-through.
+  - Unconfigured, sharing-disabled, or out-of-scope `Stop` (`hook stop` when `agy.json` is absent, `sharing_enabled == False`, or `workspace_root` is outside `project_roots`) MUST return `{}` in `< 100ms` with zero network I/O, zero `admission.sqlite3` creation, and zero transcript reads, and `Stop` NEVER emits `"decision": "continue"`.
 - **Zero Pre-Call Session-Binding Gates on Deterministic Tools (`P2.7`)**:
   - Standard MCP `tools/call` on `mindie-remote-dev` (`remote_*`) and `mindie-tools` (`profiler`, `sim`, `coordinator`, `debugger`, `npu_top`, `diagnostics_*`, `mindie_status`) works with zero `_meta`, zero `PreToolUse` binds, and zero `AGY_CONVERSATION_ID`, falling back to `_CONNECTION_SESSION_ID`.
 - **Concurrent Resident Stdio MCP & `mindie-harness` Substrate (`AD-03`, `AD-07`, `AD-10`)**:
@@ -25,7 +25,7 @@
 | :--- | :--- |
 | `mindie_launch.py` | Entrypoint for `hook`, `mcp`, `setup`, and `update`; `< 100ms` passive `Stop` fast-path and paired `(python, runtime_scripts)` re-exec. |
 | `host_adapter.py` | `AGYHostAdapter` (`mindie_harness.api.HostAdapter`), `verify_seed_bundle()`, and concurrent dual-framing stdio loop (`serve_concurrent_stdio`). |
-| `bridge.py` / `admission.py` / `identity.py` | Antigravity `SessionStart`, `PreInvocation` (`/mindie-agent`), `PreToolUse` one-shot bind, and `Stop` handoff. |
+| `bridge.py` / `admission.py` / `identity.py` | Antigravity `SessionStart`, silent `{}` `PreInvocation`, `PreToolUse` one-shot bind, and `Stop` handoff. |
 | `mcp_server.py` / `knowledge_cli.py` | Public MCP surfaces (`remote`, `tools` including default-enabled `knowledge_*`) and CLI knowledge entrypoint. |
 | `setup.py` / `component_update.py` / `storage_lifecycle.py` | Atomic `agy.json` / `agy-source` provisioning, candidate-first component updates, and bounded `.trash/` generation reclamation. |
 | `agy_transcript.py` / `organizer.py` | Read-only Antigravity brain JSONL projection and isolated summary/C6 distillation worker. |

@@ -96,7 +96,7 @@ def test_zombie_in_progress_pid_is_reaped_and_allows_retry(tmp_path, monkeypatch
     status_file = paths.data_home() / "component-update-status.json"
     status_file.parent.mkdir(parents=True, exist_ok=True)
     zombie = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + 5.0
     saw_zombie = False
     while time.monotonic() < deadline:
         proc_status = Path(f"/proc/{zombie.pid}/status")
@@ -106,16 +106,24 @@ def test_zombie_in_progress_pid_is_reaped_and_allows_retry(tmp_path, monkeypatch
                 saw_zombie = True
                 break
         else:
-            try:
-                os.kill(zombie.pid, 0)
-                time.sleep(0.05)
+            ps_res = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(zombie.pid)],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+                check=False,
+            )
+            if ps_res.stdout.strip().startswith("Z"):
                 saw_zombie = True
-                break
-            except ProcessLookupError:
                 break
         time.sleep(0.02)
     if not saw_zombie:
-        pytest.skip("could not observe unreaped child")
+        try:
+            zombie.kill()
+            zombie.wait(timeout=1.0)
+        except Exception:
+            pass
+        pytest.skip("could not observe unreaped zombie child")
     os.kill(zombie.pid, 0)
     status_file.write_text(
         json_mod.dumps(

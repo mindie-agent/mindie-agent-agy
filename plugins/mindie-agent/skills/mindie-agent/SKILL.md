@@ -1,14 +1,15 @@
 ---
 name: mindie-agent
 description: Ascend NPU, vLLM-Ascend, xLLM, MindIE-SD, and AscendC/Triton engineering workflow: L1-L4 graded knowledge retrieval/distillation, remote NPU development, profiling, Roofline simulation, CANN fault triage, and cluster lease coordination.
+disable-slash-command: true
 ---
 
 # MindIE Agent Runtime Workflow
 
 ## 1. Default-Enabled MCP Tooling
 
-- **Ready out of the box**: While the `mindie-agent` plugin is enabled in Antigravity, all tools on `mindie-remote-dev` (`remote_*`) and `mindie-tools` (`mindie_status`, `debugger`, `profiler`, `sim`, `coordinator`, `npu_top`, `diagnostics_status`, `diagnostics_bundle`, plus `knowledge_query`, `knowledge_explain`, `knowledge_feedback`, `knowledge_distill`, `knowledge_sync`) work over standard MCP without `/mindie-agent`, `PreToolUse` binds, or `context_file`.
-- **Conversation mute & task continuity**: `/mindie-agent deactivate` mutes knowledge tools and turn-end capture in the current conversation (`/mindie-agent` re-enables). If any optional helper fails, report the error once and continue with deterministic MCP or authorized host-native tools; reconcile any `unknown` remote write before repeating it.
+- **Ready out of the box**: While the `mindie-agent` plugin is enabled in Antigravity, all tools on `mindie-remote-dev` (`remote_*`) and `mindie-tools` (`mindie_status`, `debugger`, `profiler`, `sim`, `coordinator`, `npu_top`, `diagnostics_status`, `diagnostics_bundle`, plus `knowledge_query`, `knowledge_explain`, `knowledge_feedback`, `knowledge_distill`, `knowledge_sync`) work over standard MCP without slash-command activation, `PreToolUse` binds, or `context_file`.
+- **Task continuity**: If any optional helper fails, report the error once and continue with deterministic MCP or authorized host-native tools; reconcile any `unknown` remote write before repeating it.
 
 ## 2. Code-First Investigation, Knowledge & NPU Discipline
 
@@ -22,5 +23,5 @@ description: Ascend NPU, vLLM-Ascend, xLLM, MindIE-SD, and AscendC/Triton engine
 ## 3. Progressive Runtime References
 
 - Tool schemas, `L1–L4` distillation & NPU lease rules: [references/domain-skills.md](references/domain-skills.md)
-- Default session lifecycle, `/mindie-agent deactivate` & `Stop` capture: [references/activation-lifecycle.md](references/activation-lifecycle.md)
+- Default session lifecycle & `Stop` capture: [references/activation-lifecycle.md](references/activation-lifecycle.md)
 - Deep diagnostic, distributed & accuracy reasoning: [references/diagnostic-reasoning.md](references/diagnostic-reasoning.md)

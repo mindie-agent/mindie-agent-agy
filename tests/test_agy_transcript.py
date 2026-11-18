@@ -40,7 +40,7 @@ def test_transcript_extracts_public_messages_and_excludes_thinking_and_metadata(
             "status": "DONE",
             "created_at": "2026-10-31T08:25:00Z",
             "content": (
-                "<USER_REQUEST>\n/mindie-agent 分析 vLLM-Ascend A3 双 Die Phy-ID 映射规则\n</USER_REQUEST>\n"
+                "<USER_REQUEST>\n分析 vLLM-Ascend A3 双 Die Phy-ID 映射规则\n</USER_REQUEST>\n"
                 "<ADDITIONAL_METADATA>\nThe current local time is 2026-10-31.\n</ADDITIONAL_METADATA>\n"
                 "<USER_SETTINGS_CHANGE>\nModel changed.\n</USER_SETTINGS_CHANGE>"
             ),

@@ -54,7 +54,6 @@ STRIP_TAGS_RE = re.compile(
     r"<(?:ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|SYSTEM_MESSAGE)>.*?</(?:ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|SYSTEM_MESSAGE)>",
     re.DOTALL,
 )
-GESTURE_PREFIX_RE = re.compile(r"^\s*(?:/mindie-agent|\$mindie-agent(?::mindie-agent)?)(?:\s+|$)")
 
 
 def _canonical_path(path: str | Path) -> str:
@@ -256,12 +255,7 @@ def capture_source(path: str | Path, session_id: str, *, binding: dict | None = 
 def _clean_user_text(raw: str) -> str:
     match = USER_REQUEST_RE.search(raw)
     text = match.group(1) if match is not None else STRIP_TAGS_RE.sub("", raw)
-    text = STRIP_TAGS_RE.sub("", text).strip()
-    if GESTURE_PREFIX_RE.match(text):
-        text = GESTURE_PREFIX_RE.sub("", text, count=1).strip()
-        if text in {"", "deactivate", "status", "init", "recover"}:
-            return ""
-    return text
+    return STRIP_TAGS_RE.sub("", text).strip()
 
 
 def _extract(record: dict) -> tuple[str, str] | None:

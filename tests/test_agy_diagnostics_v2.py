@@ -34,14 +34,6 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path,
     diag_root.mkdir(parents=True, exist_ok=True)
     ws = base / "ws"
     ws.mkdir(parents=True, exist_ok=True)
-    bridge.handle_pre_invocation(
-        {
-            "conversationId": SESSION_A,
-            "workspacePaths": [str(ws)],
-            "lastUserInput": "/mindie-agent activate session",
-        },
-        config=agy_cfg,
-    )
     configure_reporting(True, roots=[str(diag_root)], config=diag_cfg)
     return diag_root, diag_cfg, agy_cfg
 

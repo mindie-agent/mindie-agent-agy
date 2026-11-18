@@ -269,9 +269,11 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     raise RuntimeError("active plugin payload does not match its recorded version")
         if (
-            argv == ["hook", "stop"]
-            and subprocess.Popen is _STDLIB_POPEN
-            and _is_passive_stop()
+            subprocess.Popen is _STDLIB_POPEN
+            and (
+                argv == ["hook", "pre-invocation"]
+                or (argv == ["hook", "stop"] and _is_passive_stop())
+            )
         ):
             from identity import MAX_HOOK_BYTES, parse_hook
 

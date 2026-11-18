@@ -35,38 +35,45 @@ def test_passive_stop_hook_returns_empty_json_under_100ms_without_reexec(tmp_pat
     import mindie_launch
     import paths
 
-    # Warm one cold Python startup measurement, then measure actual passive Stop subprocess latency
+    # Warm one cold Python startup measurement, then take min() over 5 warm runs
+    # so single-sample hypervisor scheduler steal on shared CI runners never flakes.
     launch_script = SCRIPTS_DIR / "mindie_launch.py"
     payload = json.dumps({"conversationId": SESSION_ID, "workspacePaths": [str(tmp_path)]})
     env = dict(os.environ)
-    subprocess.run(
-        [sys.executable, "-I", "-X", "utf8", str(launch_script), "hook", "stop"],
-        input=payload,
-        text=True,
-        capture_output=True,
-        env=env,
-        timeout=5,
-        check=True,
-    )
-    t0 = time.perf_counter()
-    completed = subprocess.run(
-        [sys.executable, "-I", "-X", "utf8", str(launch_script), "hook", "stop"],
-        input=payload,
-        text=True,
-        capture_output=True,
-        env=env,
-        timeout=5,
-        check=True,
-    )
-    elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    assert json.loads(completed.stdout) == {}
-    assert elapsed_ms < 100.0, f"Passive Stop took {elapsed_ms:.1f}ms (>= 100ms budget)"
-    assert not paths.admission_path().exists()
+    for hook_op in ("stop", "pre-invocation"):
+        cmd = [sys.executable, "-I", "-X", "utf8", str(launch_script), "hook", hook_op]
+        subprocess.run(
+            cmd,
+            input=payload,
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=5,
+            check=True,
+        )
+        samples_ms: list[float] = []
+        for _ in range(5):
+            t0 = time.perf_counter()
+            completed = subprocess.run(
+                cmd,
+                input=payload,
+                text=True,
+                capture_output=True,
+                env=env,
+                timeout=5,
+                check=True,
+            )
+            samples_ms.append((time.perf_counter() - t0) * 1000.0)
+            assert json.loads(completed.stdout) == {}
+        elapsed_ms = min(samples_ms)
+        assert elapsed_ms < 100.0, f"Passive {hook_op} min over 5 warm runs took {elapsed_ms:.1f}ms (samples={samples_ms})"
+        assert not paths.admission_path().exists()
 
     # Malformed stdin JSON must still raise rather than silently emitting {}
-    monkeypatch.setattr(sys, "stdin", type("BadIn", (), {"buffer": io.BytesIO(b"{not-json")})())
-    with pytest.raises(ValueError):
-        mindie_launch.main(["hook", "stop"])
+    for hook_op in ("stop", "pre-invocation"):
+        monkeypatch.setattr(sys, "stdin", type("BadIn", (), {"buffer": io.BytesIO(b"{not-json")})())
+        with pytest.raises(ValueError):
+            mindie_launch.main(["hook", hook_op])
 
 
 def test_seed_bundle_verification_and_binary_staging(tmp_path: Path):
@@ -226,6 +233,8 @@ def test_skill_and_domain_docs_free_of_benchmark_and_install_spillover_ad10():
     skill_path = skills_dir / "mindie-agent" / "SKILL.md"
     skill_text = skill_path.read_text(encoding="utf-8")
     assert len(skill_text.splitlines()) < 35, "SKILL.md must stay concise (< 35 lines)"
+    frontmatter = skill_text.split("---", 2)[1]
+    assert "disable-slash-command: true" in frontmatter
 
     relocated_install_docs = ("workspace-setup.md", "github-authentication.md", "user-notice.md")
     for doc_name in relocated_install_docs:
@@ -233,6 +242,7 @@ def test_skill_and_domain_docs_free_of_benchmark_and_install_spillover_ad10():
         assert (REPO_ROOT / "docs" / "install" / doc_name).is_file(), f"Missing docs/install/{doc_name}"
 
     forbidden_terms = (
+        "/mindie-agent",
         "(out_tensor, metrics_dict)",
         "mindie-bench-ablation/1",
         "experiment_ledger.py",

@@ -19,7 +19,7 @@ Whenever `capture_source()` receives `transcript.jsonl` and a sibling `transcrip
 | `type == "USER_INPUT"` and `source == "USER_EXPLICIT"` | Extracts text inside `<USER_REQUEST>...</USER_REQUEST>` while stripping `<ADDITIONAL_METADATA>`, `<USER_SETTINGS_CHANGE>`, `<SYSTEM_MESSAGE>`, and `<EPHEMERAL_MESSAGE>` blocks |
 | `type == "PLANNER_RESPONSE"` and `source == "MODEL"` | Extracts only visible `content`; **strictly excludes** `thinking` (internal chain-of-thought) and `tool_calls` |
 | All other step types (`GENERIC` tool outputs, system steps) | Ignored and never exported |
-| Activation Timestamp Boundary (`not_before`) | Steps recorded before the conversation's `/mindie-agent` `activated_at` timestamp are skipped |
+| Lease Timestamp Boundary (`not_before`) | Steps recorded before the conversation lease's `activated_at` boundary (`0.0` by default) are skipped |
 
 ## 3. Incremental Cursor & Local Gitleaks Redaction
 

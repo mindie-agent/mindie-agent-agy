@@ -7,8 +7,8 @@
 ## 1. Passive Default Guarantees
 
 - **`SessionStart`**: Always returns `{}` without starting background workers or syncing feeds.
-- **Ordinary `PreInvocation`**: Immediately returns `{}` when `lastUserInput` does not invoke `/mindie-agent`.
-- **Sharing-Disabled `Stop`**: Immediately returns `{}` in `< 100ms` when unconfigured or community sharing is disabled (`sharing_enabled == False`), without creating `admission.sqlite3` or reading the transcript file.
+- **`PreInvocation`**: Immediately returns `{}` in `< 100ms` as a zero-I/O stdlib pass-through without injecting steps or touching SQLite.
+- **Sharing-Disabled or Out-of-Scope `Stop`**: Immediately returns `{}` in `< 100ms` when unconfigured, community sharing is disabled (`sharing_enabled == False`), or the workspace is outside authorized `project_roots`, without creating `admission.sqlite3` or reading the transcript file.
 
 ## 2. Atomic File Replacement & SQLite WAL Discipline
 
