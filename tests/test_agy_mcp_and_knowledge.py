@@ -131,6 +131,33 @@ def test_default_enabled_knowledge_out_of_the_box_and_session_isolation(
     assert lease_b is not None and lease_b["activated_at"] == 0.0
     assert lease_a["token"] != lease_b["token"]
 
+    # 5. knowledge_sync list payloads wrap structuredContent in {"feeds": ...}, and
+    #    adm_store.finish() errors after primary RPC success keep isError=False + receipt_warning/receipt_unconfirmed
+    def fake_sync_rpc(_conn, method, payload, timeout=None):
+        seen_rpc.append((method, dict(payload)))
+        return [{"domain": "vllm-ascend", "updated": True}]
+
+    monkeypatch.setattr(tr_mod, "rpc", fake_sync_rpc)
+
+    class BrokenFinishAdmission:
+        def __init__(self, real_adm):
+            self._real = real_adm
+            self.path = real_adm.path
+
+        def finish(self, *_a, **_k):
+            raise sqlite3.OperationalError("admission finish locked")
+
+    orig_gate = knowledge_cli.gate
+    monkeypatch.setattr(knowledge_cli, "gate", lambda cfg=None: BrokenFinishAdmission(orig_gate(cfg)))
+    sync_res = mcp_server.call_tools_surface("knowledge_sync", {}, rpc_id=105)
+    assert sync_res["isError"] is False
+    assert isinstance(sync_res["structuredContent"], dict)
+    assert sync_res["structuredContent"]["feeds"] == [{"domain": "vllm-ascend", "updated": True}]
+    assert sync_res["structuredContent"]["receipt_unconfirmed"] is True
+    assert "OperationalError" in sync_res["structuredContent"]["receipt_warning"]
+    assert sync_res["receipt_unconfirmed"] is True
+    assert "OperationalError" in sync_res["receipt_warning"]
+
 
 def test_receipt_honesty_preserves_succeeded_remote_result_on_local_sqlite_error(monkeypatch: pytest.MonkeyPatch):
     import remote_dev.mcp.tools as rd_tools

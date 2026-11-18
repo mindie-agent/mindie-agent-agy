@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import sys
 
-from admission import ensure_default_lease, knowledge_lease
+from admission import ensure_default_lease
 from agy_transcript import capture_source
 from component_update import trigger_background_update_if_due
 from identity import (
@@ -141,14 +141,9 @@ def handle_stop(event: dict | None = None, *, config=None) -> dict:
         return {}
     if not config_path(config).is_file():
         return {}
-    workspace_root: str | None = None
     try:
         workspace_root = workspace_from_hook(event)
     except ValueError:
-        existing = knowledge_lease(session, config=config)
-        if existing is not None and isinstance(existing.get("project_root"), str):
-            workspace_root = existing["project_root"]
-    if not workspace_root:
         return {}
     allowed, _reason = _allows_community_capture(workspace_root, config=config)
     if not allowed:

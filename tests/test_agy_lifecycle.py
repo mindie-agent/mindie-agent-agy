@@ -82,6 +82,10 @@ def test_pre_invocation_is_silent_passthrough_and_skill_hides_slash_command(tmp_
         bridge.handle_pre_invocation(["not-an-object"])  # type: ignore[arg-type]
 
     # Default lease provisioning creates an active lease for SESSION_A without touching SESSION_B
+    stale_dir = tmp_path / "stale_cwd"
+    stale_dir.mkdir()
+    stale_lease = admission.ensure_default_lease(SESSION_A, stale_dir, not_before=0.0)
+    assert Path(stale_lease["project_root"]) == stale_dir.resolve()
     lease = admission.ensure_default_lease(SESSION_A, workspace, not_before=0.0)
     assert lease["enabled"] == 1
     assert lease["entry_enabled"] == 1
@@ -249,6 +253,86 @@ def test_stop_never_forces_continuation_and_captures_when_sharing_enabled(
     assert forwarded["transcript_path"] == str(transcript.resolve())
     lease = admission.knowledge_lease(SESSION_A)
     assert lease is not None and lease["activated_at"] == 0.0
+
+    # 5. Missing workspacePaths on Stop returns {} immediately without falling back to stale lease project_root
+    missing_ws_stop = bridge.handle_stop(
+        {
+            "conversationId": SESSION_A,
+            "transcriptPath": str(transcript),
+            "executionNum": 3,
+            "terminationReason": "NO_TOOL_CALL",
+        }
+    )
+    assert missing_ws_stop == {}
+    assert len(captured_calls) == 1
+
+
+def test_first_opted_in_stop_commits_capture_row_without_prior_knowledge_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import sqlite3
+    import mindie_launch
+    from mindie_knowledge.loop import handoff
+    import paths
+
+    workspace = tmp_path / "ws_first_stop"
+    workspace.mkdir()
+    stale_cwd = tmp_path / "mcp_cwd"
+    stale_cwd.mkdir()
+    monkeypatch.chdir(stale_cwd)
+
+    brain_logs = tmp_path / "gemini" / "antigravity" / "brain" / SESSION_A / ".system_generated" / "logs"
+    brain_logs.mkdir(parents=True)
+    transcript = brain_logs / "transcript_full.jsonl"
+    transcript.write_text(
+        json.dumps(
+            {
+                "step_index": 0,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "status": "DONE",
+                "created_at": "2026-10-31T08:21:33Z",
+                "content": "<USER_REQUEST>\nVerify first Stop schema readiness\n</USER_REQUEST>",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    # Enable community sharing for workspace (without running any knowledge_query first)
+    setup.configure_community(enabled=True, fork="user/knowledge-vllm-ascend", project_root=workspace)
+
+    # Even if an earlier MCP call created a lease against stale_cwd, Stop realigns project_root to workspace
+    admission.ensure_default_lease(SESSION_A, stale_cwd, not_before=0.0)
+
+    monkeypatch.setattr(
+        handoff,
+        "request_wake",
+        lambda *_a, **_k: {"wake": "not-requested", "runtime": "unavailable", "reason": "committed"},
+    )
+    monkeypatch.setattr(mindie_launch, "_preferred_python", lambda: sys.executable)
+    stop_payload = json.dumps(
+        {
+            "conversationId": SESSION_A,
+            "workspacePaths": [str(workspace)],
+            "transcriptPath": str(transcript),
+            "executionNum": 1,
+            "terminationReason": "NO_TOOL_CALL",
+        }
+    ).encode("utf-8")
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(stop_payload), encoding="utf-8"))
+    assert mindie_launch.main(["hook", "stop"]) == 0
+
+    state_dbs = list(paths.data_home().rglob("state-v4.sqlite3"))
+    assert len(state_dbs) == 1
+    conn = sqlite3.connect(state_dbs[0])
+    try:
+        row_count = conn.execute("SELECT COUNT(*) FROM captures").fetchone()[0]
+    finally:
+        conn.close()
+    assert row_count == 1
+    realigned = admission.knowledge_lease(SESSION_A)
+    assert realigned is not None and Path(realigned["project_root"]) == workspace.resolve()
 
 
 def test_pre_tool_use_bind_failure_denies_with_host_readable_stdout(tmp_path: Path, monkeypatch, capsys):
@@ -477,7 +561,7 @@ def test_session_start_timeout_does_not_continue_to_lease(tmp_path, monkeypatch,
         }
 
     monkeypatch.setattr(bridge_mod, "trigger_background_update_if_due", boom_update)
-    monkeypatch.setattr(bridge_mod, "knowledge_lease", mark_lease)
+    monkeypatch.setattr(bridge_mod, "ensure_default_lease", mark_lease)
     event = {"conversationId": SESSION_A, "workspacePaths": [str(tmp_path)]}
     monkeypatch.setattr(sys, "stdin", type("Stdin", (), {"buffer": io.BytesIO(json.dumps(event).encode())})())
     started = time.monotonic()
@@ -516,7 +600,7 @@ def test_session_start_alarm_does_not_run_unbounded_lease(tmp_path, monkeypatch,
         }
 
     monkeypatch.setattr(bridge_mod, "trigger_background_update_if_due", slow_update)
-    monkeypatch.setattr(bridge_mod, "knowledge_lease", slow_lease)
+    monkeypatch.setattr(bridge_mod, "ensure_default_lease", slow_lease)
     event = {"conversationId": SESSION_A, "workspacePaths": [str(tmp_path)]}
     monkeypatch.setattr(sys, "stdin", type("Stdin", (), {"buffer": io.BytesIO(json.dumps(event).encode())})())
     started = time.monotonic()

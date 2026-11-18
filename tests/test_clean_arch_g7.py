@@ -229,12 +229,20 @@ def test_symlinked_metadata_and_diagnostics_supported_ad07(tmp_path: Path):
 
 
 def test_skill_and_domain_docs_free_of_benchmark_and_install_spillover_ad10():
+    import re
+    import yaml
+
     skills_dir = PLUGIN_ROOT / "skills"
     skill_path = skills_dir / "mindie-agent" / "SKILL.md"
     skill_text = skill_path.read_text(encoding="utf-8")
     assert len(skill_text.splitlines()) < 35, "SKILL.md must stay concise (< 35 lines)"
     frontmatter = skill_text.split("---", 2)[1]
-    assert "disable-slash-command: true" in frontmatter
+    parsed_fm = yaml.safe_load(frontmatter)
+    assert isinstance(parsed_fm, dict)
+    assert parsed_fm.get("name") == "mindie-agent"
+    assert parsed_fm.get("disable-slash-command") is True
+    assert "disable-model-invocation" not in parsed_fm
+    assert isinstance(parsed_fm.get("description"), str) and parsed_fm["description"].strip()
 
     relocated_install_docs = ("workspace-setup.md", "github-authentication.md", "user-notice.md")
     for doc_name in relocated_install_docs:
@@ -242,7 +250,6 @@ def test_skill_and_domain_docs_free_of_benchmark_and_install_spillover_ad10():
         assert (REPO_ROOT / "docs" / "install" / doc_name).is_file(), f"Missing docs/install/{doc_name}"
 
     forbidden_terms = (
-        "/mindie-agent",
         "(out_tensor, metrics_dict)",
         "mindie-bench-ablation/1",
         "experiment_ledger.py",
@@ -257,6 +264,24 @@ def test_skill_and_domain_docs_free_of_benchmark_and_install_spillover_ad10():
         content = md_file.read_text(encoding="utf-8")
         for forbidden in forbidden_terms:
             assert forbidden not in content, f"Forbidden spillover {forbidden!r} found in {md_file.relative_to(REPO_ROOT)}"
+
+    slash_cmd_re = re.compile(
+        r"(?<![A-Za-z0-9_./:-])(?<!\})[/\$]mindie-agent(?::mindie-agent)?(?![A-Za-z0-9_./-])"
+    )
+    scan_targets = list(sorted(skills_dir.rglob("*.md")))
+    scan_targets.append(PLUGIN_ROOT / "plugin.json")
+    scan_targets.extend(sorted(REPO_ROOT.glob("README*.md")))
+    for doc_file in sorted((REPO_ROOT / "docs").rglob("*.md")):
+        rel = doc_file.relative_to(REPO_ROOT).as_posix()
+        if rel.startswith(("docs/releases/", "docs/archive/")):
+            continue
+        scan_targets.append(doc_file)
+    for target_file in scan_targets:
+        text = target_file.read_text(encoding="utf-8")
+        match = slash_cmd_re.search(text)
+        assert match is None, (
+            f"Unexpected slash-command token {match.group(0)!r} in {target_file.relative_to(REPO_ROOT)}"
+        )
 
 
 def test_pr_checklist_host_plugin_profile():

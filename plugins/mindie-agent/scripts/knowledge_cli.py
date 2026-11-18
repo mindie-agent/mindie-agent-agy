@@ -225,6 +225,7 @@ def invoke(
     args = dict(arguments or {})
     target_engine = _select_engine_path(config, args)
     lease = ensure_default_lease(session_id, not_before=0.0, config=config)
+    desired_root = lease.get("project_root") or str(Path(os.getcwd()).resolve())
     adm_store = gate(config)
     if target_engine.is_file():
         eng_adm = read_json(target_engine).get("admission_path")
@@ -233,13 +234,19 @@ def invoke(
 
             adm_store = Admission(eng_adm)
             existing_domain_lease = adm_store.knowledge_lease(session_id) if Path(eng_adm).is_file() else None
-            if existing_domain_lease is not None:
+            existing_domain_root = existing_domain_lease.get("project_root") if existing_domain_lease else None
+            if (
+                existing_domain_lease is not None
+                and isinstance(existing_domain_root, str)
+                and existing_domain_root
+                and Path(existing_domain_root).resolve() == Path(desired_root).resolve()
+            ):
                 lease = existing_domain_lease
             else:
                 adm_store.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 lease = adm_store.activate(
                     session_id,
-                    project_root=lease.get("project_root") or str(Path(os.getcwd()).resolve()),
+                    project_root=str(Path(desired_root).resolve()),
                     root_session=session_id,
                     not_before=0.0,
                 )
@@ -276,9 +283,10 @@ def invoke(
 
                 value, is_error = result_view(value)
             succeeded = not is_error
+            structured = value if isinstance(value, dict) else {"feeds": value}
             result = dict(
                 content=[dict(type="text", text=json.dumps(value, ensure_ascii=False))],
-                structuredContent=value,
+                structuredContent=structured,
                 isError=is_error,
             )
         except RequestRejected as exc:
@@ -308,19 +316,39 @@ def invoke(
             try:
                 adm_store.finish(session_id, token, succeeded)
             except Exception as exc:
+                if not succeeded and isinstance(exc, TimeoutError):
+                    raise
                 if pending is None:
-                    result["accounting"] = dict(
-                        status="failed",
-                        error_type=type(exc).__name__,
-                        execution="completed",
-                        automatic_retry=False,
-                    )
-                    result["content"].append(
-                        dict(
-                            type="text",
-                            text="Knowledge operation completed; outcome accounting failed. Do not repeat the operation.",
+                    warn = f"{type(exc).__name__}: {exc}"
+                    if succeeded:
+                        structured_out = dict(result.get("structuredContent") or {})
+                        structured_out["receipt_warning"] = warn
+                        structured_out["receipt_unconfirmed"] = True
+                        result["structuredContent"] = structured_out
+                        result["receipt_warning"] = warn
+                        result["receipt_unconfirmed"] = True
+                        result["isError"] = False
+                        result["accounting"] = dict(
+                            status="failed",
+                            error_type=type(exc).__name__,
+                            execution="completed",
+                            automatic_retry=False,
+                            receipt_warning=warn,
+                            receipt_unconfirmed=True,
                         )
-                    )
+                        result["content"].append(
+                            dict(
+                                type="text",
+                                text="Knowledge operation completed; outcome accounting failed. Do not repeat the operation.",
+                            )
+                        )
+                    else:
+                        result["accounting"] = dict(
+                            status="failed",
+                            error_type=type(exc).__name__,
+                            execution="failed",
+                            automatic_retry=False,
+                        )
 
 
 def _format_failure(exc: Exception) -> dict:

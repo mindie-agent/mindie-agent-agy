@@ -51,6 +51,20 @@ def knowledge_lease(session: str, *, config: str | Path | None = None) -> dict |
     return gate(config).knowledge_lease(session)
 
 
+def _prepare_engine_schema(config: str | Path | None = None) -> None:
+    eng_file = engine_config_path(config)
+    if not eng_file.is_file():
+        return
+    try:
+        from mindie_knowledge.loop.handoff import prepare_schema
+
+        prepare_schema(str(eng_file))
+    except TimeoutError:
+        raise
+    except (OSError, ValueError):
+        pass
+
+
 def ensure_default_lease(
     session: str,
     project_root: str | Path | None = None,
@@ -59,13 +73,26 @@ def ensure_default_lease(
     config: str | Path | None = None,
 ) -> dict:
     session = require_session_or_scope(session)
+    explicit_root = str(Path(project_root).resolve()) if project_root is not None else None
     existing = knowledge_lease(session, config=config)
     if existing is not None:
-        return existing
-    root = str(Path(project_root or os.getcwd()).resolve())
+        existing_root = existing.get("project_root")
+        if explicit_root is None or (
+            isinstance(existing_root, str)
+            and existing_root
+            and Path(existing_root).resolve() == Path(explicit_root).resolve()
+        ):
+            return existing
+        not_before = (
+            existing["not_before"]
+            if existing.get("not_before") is not None
+            else existing.get("activated_at", 0.0)
+        )
+    root = explicit_root or str(Path(os.getcwd()).resolve())
     adm = gate(config)
     adm.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     lease = adm.activate(session, project_root=root, root_session=session, not_before=not_before)
+    _prepare_engine_schema(config)
     return dict(
         lease,
         enabled=int(bool(lease.get("enabled", 1))),

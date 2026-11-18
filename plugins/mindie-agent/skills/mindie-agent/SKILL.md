@@ -1,6 +1,6 @@
 ---
 name: mindie-agent
-description: Ascend NPU, vLLM-Ascend, xLLM, MindIE-SD, and AscendC/Triton engineering workflow: L1-L4 graded knowledge retrieval/distillation, remote NPU development, profiling, Roofline simulation, CANN fault triage, and cluster lease coordination.
+description: "Ascend NPU, vLLM-Ascend, xLLM, MindIE-SD, and AscendC/Triton engineering workflow: L1-L4 graded knowledge retrieval/distillation, remote NPU development, profiling, Roofline simulation, CANN fault triage, and cluster lease coordination."
 disable-slash-command: true
 ---
 

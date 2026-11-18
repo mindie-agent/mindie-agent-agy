@@ -25,6 +25,7 @@ and setup commands (`setup ...`) under explicit timeout budgets.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 from pathlib import Path
@@ -45,7 +46,6 @@ HOOK_UV_STARTUP = 5.0
 HOOK_OUTER_SECONDS = int(HOOK_TOTAL + HOOK_UV_STARTUP)
 BOOTSTRAP_TOTAL = 540.0
 BOOTSTRAP_CLEANUP_GRACE = 5.0
-_STDLIB_POPEN = subprocess.Popen
 
 
 def _norm_python_path(py_exe: str | Path) -> Path:
@@ -190,17 +190,57 @@ def _emit_reexec_timeout(argv: list[str], exc: BaseException) -> int:
     return 1
 
 
-def _is_passive_stop() -> bool:
+def _norm_scope_path(raw: str | Path) -> Path:
+    resolved = str(Path(raw).expanduser().resolve(strict=False))
+    if os.name == "nt":
+        resolved = os.path.normcase(resolved.removeprefix("\\\\?\\"))
+    return Path(resolved)
+
+
+def _is_passive_stop(event: dict) -> bool:
+    from identity import session_from_hook, workspace_from_hook
+
+    try:
+        session_from_hook(event)
+        workspace_root = workspace_from_hook(event)
+    except ValueError:
+        return True
     cfg = config_path()
     if not cfg.is_file():
         return True
     from setup_sharing import sharing_status
 
     share = sharing_status(cfg, read_json_fn=read_json)
-    return share.get("sharing_enabled") is False
+    enabled = share.get("sharing_enabled")
+    if enabled is False:
+        return True
+    if enabled is True:
+        roots = share.get("project_roots") or []
+        if not roots:
+            return True
+        ws_norm = _norm_scope_path(workspace_root)
+        for root in roots:
+            if not isinstance(root, str) or not root.strip():
+                continue
+            try:
+                if ws_norm.is_relative_to(_norm_scope_path(root)):
+                    return False
+            except TimeoutError:
+                raise
+            except (OSError, ValueError):
+                continue
+        return True
+    return False
 
 
-def _reexec(target_py: str, target_script: Path, argv: list[str], env: dict) -> int:
+def _reexec(
+    target_py: str,
+    target_script: Path,
+    argv: list[str],
+    env: dict,
+    *,
+    input_bytes: bytes | None = None,
+) -> int:
     from bounded import _attach_windows_job, _close_windows_job, _kill_process_tree
 
     timeout = _timeout_role_budget(argv[0], argv)
@@ -211,17 +251,26 @@ def _reexec(target_py: str, target_script: Path, argv: list[str], env: dict) -> 
         if timeout is not None:
             flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         popen_kwargs["creationflags"] = flags
-        popen_kwargs["stdin"] = _reexec_stdio(sys.stdin)
+        if input_bytes is None:
+            popen_kwargs["stdin"] = _reexec_stdio(sys.stdin)
         popen_kwargs["stdout"] = _reexec_stdio(sys.stdout)
         popen_kwargs["stderr"] = _reexec_stdio(sys.stderr)
     elif timeout is not None:
         popen_kwargs["start_new_session"] = True
     try:
         if timeout is None:
-            return int(subprocess.run(cmd, **popen_kwargs).returncode)
+            run_kw = dict(popen_kwargs)
+            if input_bytes is not None:
+                run_kw["input"] = input_bytes
+            return int(subprocess.run(cmd, **run_kw).returncode)
+        if input_bytes is not None:
+            popen_kwargs["stdin"] = subprocess.PIPE
         proc = subprocess.Popen(cmd, **popen_kwargs)
         job = _attach_windows_job(proc, kill_on_close=(argv[0] != "hook"))
         try:
+            if input_bytes is not None and hasattr(proc, "communicate"):
+                proc.communicate(input=input_bytes, timeout=timeout)
+                return int(proc.returncode or 0)
             return int(proc.wait(timeout=timeout))
         except (subprocess.TimeoutExpired, TimeoutError) as exc:
             _kill_process_tree(proc, job, wait_timeout=min(0.5, HOOK_CLEANUP_GRACE))
@@ -240,7 +289,24 @@ def main(argv: list[str] | None = None) -> int:
     if not argv:
         raise SystemExit("mindie_launch requires a subcommand: hook | mcp | setup | update")
 
+    stop_raw: bytes | None = None
     try:
+        if argv == ["hook", "pre-invocation"]:
+            from identity import MAX_HOOK_BYTES, parse_hook
+
+            parse_hook(sys.stdin.buffer.read(MAX_HOOK_BYTES + 1))
+            sys.stdout.buffer.write(b"{}\n")
+            sys.stdout.buffer.flush()
+            return 0
+        if argv == ["hook", "stop"]:
+            from identity import MAX_HOOK_BYTES, parse_hook
+
+            stop_raw = sys.stdin.buffer.read(MAX_HOOK_BYTES + 1)
+            stop_event = parse_hook(stop_raw)
+            if _is_passive_stop(stop_event):
+                sys.stdout.buffer.write(b"{}\n")
+                sys.stdout.buffer.flush()
+                return 0
         target_py = _preferred_python()
         target_script = Path(__file__).resolve()
         if argv[0] in {"hook", "mcp"} and config_path().is_file():
@@ -269,19 +335,6 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     raise RuntimeError("active plugin payload does not match its recorded version")
         if (
-            subprocess.Popen is _STDLIB_POPEN
-            and (
-                argv == ["hook", "pre-invocation"]
-                or (argv == ["hook", "stop"] and _is_passive_stop())
-            )
-        ):
-            from identity import MAX_HOOK_BYTES, parse_hook
-
-            parse_hook(sys.stdin.buffer.read(MAX_HOOK_BYTES + 1))
-            sys.stdout.buffer.write(b"{}\n")
-            sys.stdout.buffer.flush()
-            return 0
-        if (
             target_py is not None
             and (_norm_python_path(sys.executable) != _norm_python_path(target_py)
                  or target_script != Path(__file__).resolve())
@@ -294,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
                 env["AGY_PLUGIN_ROOT"] = str(target_script.parent.parent)
             if argv[0] == "hook":
                 env["_MINDIE_AGY_HOOK_BUDGETED"] = "1"
-            return _reexec(target_py, target_script, argv, env)
+            return _reexec(target_py, target_script, argv, env, input_bytes=stop_raw)
     except TimeoutError as exc:
         return _emit_reexec_timeout(argv, exc)
 
@@ -310,10 +363,16 @@ def main(argv: list[str] | None = None) -> int:
             env["_MINDIE_AGY_REEXEC"] = "1"
             env["PYTHONIOENCODING"] = "utf-8"
             env["PYTHONUTF8"] = "1"
-            return _reexec(sys.executable, Path(__file__).resolve(), argv, env)
-        if os.name != "nt" and not budgeted:
-            return _run_hook_with_exec_budget(argv, rest)
-        return bridge.main(rest)
+            return _reexec(sys.executable, Path(__file__).resolve(), argv, env, input_bytes=stop_raw)
+        prev_stdin = sys.stdin
+        if stop_raw is not None:
+            sys.stdin = io.TextIOWrapper(io.BytesIO(stop_raw), encoding="utf-8")
+        try:
+            if os.name != "nt" and not budgeted:
+                return _run_hook_with_exec_budget(argv, rest)
+            return bridge.main(rest)
+        finally:
+            sys.stdin = prev_stdin
     if role == "mcp":
         import mcp_server
 
