@@ -19,7 +19,7 @@ Antigravity 将会话日志存储在 `<appDataDir>/brain/<conversationId>/.syste
 | `type == "USER_INPUT"` 且 `source == "USER_EXPLICIT"` | 提取 `<USER_REQUEST>...</USER_REQUEST>` 内的用户输入文本，自动剥离 `<ADDITIONAL_METADATA>`、`<USER_SETTINGS_CHANGE>`、`<SYSTEM_MESSAGE>`、`<EPHEMERAL_MESSAGE>` 等系统注入块 |
 | `type == "PLANNER_RESPONSE"` 且 `source == "MODEL"` | 仅提取可见的 `content` 字符串；**严格丢弃** `thinking`（模型内部思维链）与 `tool_calls`（工具调用参数） |
 | 其他步骤（`GENERIC` 工具输出、系统事件等） | 全部跳过，绝不进入公开语料 |
-| 激活时间边界（`not_before`） | 早于当前会话 `/mindie-agent` 激活时间戳（`activated_at`）的历史记录全部跳过 |
+| 租约时间边界（`not_before`） | 早于当前会话租约 `activated_at` 时间戳边界（默认 `0.0`）的历史记录全部跳过 |
 
 ## 3. 增量游标与本地 Gitleaks 脱敏
 

@@ -8,11 +8,11 @@ This directory contains the Harness interface verification records, public trans
 
 | English Document | 中文 | Summary |
 |---|---|---|
-| [Harness Interface Evidence](harness-interfaces.md) | [Antigravity Harness 接口兼容性证据](harness-interfaces.zh.md) | Registered interfaces in `harness-compatibility.json`, plugin-root `hooks.json` layout, `PreInvocation` activation, `PreToolUse` one-shot bind, and subagent `conversationId` isolation |
+| [Harness Interface Evidence](harness-interfaces.md) | [Antigravity Harness 接口兼容性证据](harness-interfaces.zh.md) | Registered interfaces in `harness-compatibility.json`, plugin-root `hooks.json` layout, zero-I/O `PreInvocation` pass-through, `PreToolUse` one-shot bind, and subagent `conversationId` isolation |
 | [Public Transcript Capture](public-transcript.md) | [公开对话采集与本地脱敏](public-transcript.zh.md) | Automatic promotion from `transcript.jsonl` to `transcript_full.jsonl`, stripping `thinking` / `tool_calls` / `<ADDITIONAL_METADATA>`, and isolated indexing |
 | [Service Identity & Consent Continuity](service-continuity.md) | [服务身份与统一授权连续性](service-continuity.zh.md) | `agy.json` / `agy.engine.json` bindings and persistent `mindie-community-config/1` & `mindie-consent/1` authorities |
 | [Failure Diagnostics & Receipt Honesty](failure-diagnostics.md) | [故障诊断、超时算术与回执诚实性](failure-diagnostics.zh.md) | `660s >= 600s + 60s` timeout arithmetic, `receipt_unconfirmed` remote receipt preservation, `outcome_unknown` replay prevention, and bounded process tree cleanup |
 | [Framework Stability](framework-stability.md) | [框架稳定性与持久化配置](framework-stability.zh.md) | Passive default guarantees, cross-platform atomic file replacement, and configuration isolation |
 | [Test Boundaries & Contracts](testing-contracts.md) | [测试边界与契约校验](testing-contracts.zh.md) | Tier-0 contract test matrix, `harness-compatibility.json` verification, and LF format gate |
 | [Workspace Setup](install/workspace-setup.md) / [GitHub Sign-In](install/github-authentication.md) / [User Notice](install/user-notice.md) | [工作区配置指南](install/workspace-setup.md) / [GitHub 认证](install/github-authentication.md) / [用户须知](install/user-notice.md) | First-time workspace setup, `gh` authentication, and community sharing notice (separated from runtime `skills/`) |
-| [Release v0.1.19 Notes](releases/mindie-agent-agy-0.1.19.en.md) | [Release v0.1.19 发布说明](releases/mindie-agent-agy-0.1.19.md) | `v0.1.19` default-enabled capabilities and pure-runtime `SKILL.md` boundary |
+| [Release v0.1.20 Notes](releases/mindie-agent-agy-0.1.20.en.md) | [Release v0.1.20 发布说明](releases/mindie-agent-agy-0.1.20.md) | `v0.1.20` silent default-on operation (`disable-slash-command: true`) and shared-runner CI timing stabilization |

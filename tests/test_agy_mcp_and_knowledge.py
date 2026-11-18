@@ -1,4 +1,4 @@
-"""Tier 0 & Tier 1 tests for default-enabled `mindie-tools` knowledge MCP, `/mindie-agent deactivate`, and Receipt Honesty."""
+"""Tier 0 & Tier 1 tests for unconditionally default-enabled `mindie-tools` knowledge MCP and Receipt Honesty."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def test_mcp_tools_exposes_default_enabled_knowledge_and_remote_catalogs(tmp_pat
         assert ann["openWorldHint"] is (kname == "knowledge_sync")
 
 
-def test_default_enabled_knowledge_out_of_the_box_and_deactivate_reenable_lifecycle(
+def test_default_enabled_knowledge_out_of_the_box_and_session_isolation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     workspace = tmp_path / "ws"
@@ -80,7 +80,7 @@ def test_default_enabled_knowledge_out_of_the_box_and_deactivate_reenable_lifecy
         "knowledge_sync",
     }
 
-    # 2. MCP call_tools_surface("knowledge_query", ...) works out-of-the-box with zero /mindie-agent
+    # 2. MCP call_tools_surface("knowledge_query", ...) works out-of-the-box with zero pre-binding
     import mindie_knowledge.loop.cli as cli_mod
     import mindie_knowledge.loop.transport as tr_mod
 
@@ -116,40 +116,47 @@ def test_default_enabled_knowledge_out_of_the_box_and_deactivate_reenable_lifecy
     assert honest_res["structuredContent"]["receipt_unconfirmed"] is True
     assert "receipt_warning" in honest_res["structuredContent"]
 
-    # 4. /mindie-agent deactivate mutes SESSION_A while SESSION_B stays active
+    # 4. Per-conversation leases stay isolated across SESSION_A and SESSION_B with not_before=0.0
     monkeypatch.setenv("AGY_CONVERSATION_ID", SESSION_A)
-    bridge.handle_pre_invocation(
-        {
-            "conversationId": SESSION_A,
-            "workspacePaths": [str(workspace)],
-            "lastUserInput": "/mindie-agent deactivate",
-        }
-    )
-    assert admission.is_deactivated(SESSION_A) is True
-    assert admission.is_deactivated(SESSION_B) is False
-
-    muted_res = mcp_server.call_tools_surface("knowledge_query", {"query": "muted"}, rpc_id=103)
-    assert muted_res["isError"] is True
-    assert muted_res["structuredContent"]["code"] == "knowledge_inactive"
-    with pytest.raises(knowledge_cli.KnowledgeInactive):
-        knowledge_cli.invoke("describe")
+    res_a = mcp_server.call_tools_surface("knowledge_query", {"query": "session-a"}, rpc_id=103)
+    assert res_a["isError"] is False
+    lease_a = admission.knowledge_lease(SESSION_A)
+    assert lease_a is not None and lease_a["activated_at"] == 0.0
+    assert admission.knowledge_lease(SESSION_B) is None
 
     monkeypatch.setenv("AGY_CONVERSATION_ID", SESSION_B)
-    other_res = mcp_server.call_tools_surface("knowledge_query", {"query": "active-b"}, rpc_id=104)
-    assert other_res["isError"] is False
+    res_b = mcp_server.call_tools_surface("knowledge_query", {"query": "session-b"}, rpc_id=104)
+    assert res_b["isError"] is False
+    lease_b = admission.knowledge_lease(SESSION_B)
+    assert lease_b is not None and lease_b["activated_at"] == 0.0
+    assert lease_a["token"] != lease_b["token"]
 
-    # 5. /mindie-agent re-enables SESSION_A
-    monkeypatch.setenv("AGY_CONVERSATION_ID", SESSION_A)
-    bridge.handle_pre_invocation(
-        {
-            "conversationId": SESSION_A,
-            "workspacePaths": [str(workspace)],
-            "lastUserInput": "/mindie-agent",
-        }
-    )
-    assert admission.is_deactivated(SESSION_A) is False
-    reenabled_res = mcp_server.call_tools_surface("knowledge_query", {"query": "restored"}, rpc_id=105)
-    assert reenabled_res["isError"] is False
+    # 5. knowledge_sync list payloads wrap structuredContent in {"feeds": ...}, and
+    #    adm_store.finish() errors after primary RPC success keep isError=False + receipt_warning/receipt_unconfirmed
+    def fake_sync_rpc(_conn, method, payload, timeout=None):
+        seen_rpc.append((method, dict(payload)))
+        return [{"domain": "vllm-ascend", "updated": True}]
+
+    monkeypatch.setattr(tr_mod, "rpc", fake_sync_rpc)
+
+    class BrokenFinishAdmission:
+        def __init__(self, real_adm):
+            self._real = real_adm
+            self.path = real_adm.path
+
+        def finish(self, *_a, **_k):
+            raise sqlite3.OperationalError("admission finish locked")
+
+    orig_gate = knowledge_cli.gate
+    monkeypatch.setattr(knowledge_cli, "gate", lambda cfg=None: BrokenFinishAdmission(orig_gate(cfg)))
+    sync_res = mcp_server.call_tools_surface("knowledge_sync", {}, rpc_id=105)
+    assert sync_res["isError"] is False
+    assert isinstance(sync_res["structuredContent"], dict)
+    assert sync_res["structuredContent"]["feeds"] == [{"domain": "vllm-ascend", "updated": True}]
+    assert sync_res["structuredContent"]["receipt_unconfirmed"] is True
+    assert "OperationalError" in sync_res["structuredContent"]["receipt_warning"]
+    assert sync_res["receipt_unconfirmed"] is True
+    assert "OperationalError" in sync_res["receipt_warning"]
 
 
 def test_receipt_honesty_preserves_succeeded_remote_result_on_local_sqlite_error(monkeypatch: pytest.MonkeyPatch):

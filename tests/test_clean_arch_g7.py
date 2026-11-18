@@ -35,38 +35,45 @@ def test_passive_stop_hook_returns_empty_json_under_100ms_without_reexec(tmp_pat
     import mindie_launch
     import paths
 
-    # Warm one cold Python startup measurement, then measure actual passive Stop subprocess latency
+    # Warm one cold Python startup measurement, then take min() over 5 warm runs
+    # so single-sample hypervisor scheduler steal on shared CI runners never flakes.
     launch_script = SCRIPTS_DIR / "mindie_launch.py"
     payload = json.dumps({"conversationId": SESSION_ID, "workspacePaths": [str(tmp_path)]})
     env = dict(os.environ)
-    subprocess.run(
-        [sys.executable, "-I", "-X", "utf8", str(launch_script), "hook", "stop"],
-        input=payload,
-        text=True,
-        capture_output=True,
-        env=env,
-        timeout=5,
-        check=True,
-    )
-    t0 = time.perf_counter()
-    completed = subprocess.run(
-        [sys.executable, "-I", "-X", "utf8", str(launch_script), "hook", "stop"],
-        input=payload,
-        text=True,
-        capture_output=True,
-        env=env,
-        timeout=5,
-        check=True,
-    )
-    elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    assert json.loads(completed.stdout) == {}
-    assert elapsed_ms < 100.0, f"Passive Stop took {elapsed_ms:.1f}ms (>= 100ms budget)"
-    assert not paths.admission_path().exists()
+    for hook_op in ("stop", "pre-invocation"):
+        cmd = [sys.executable, "-I", "-X", "utf8", str(launch_script), "hook", hook_op]
+        subprocess.run(
+            cmd,
+            input=payload,
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=5,
+            check=True,
+        )
+        samples_ms: list[float] = []
+        for _ in range(5):
+            t0 = time.perf_counter()
+            completed = subprocess.run(
+                cmd,
+                input=payload,
+                text=True,
+                capture_output=True,
+                env=env,
+                timeout=5,
+                check=True,
+            )
+            samples_ms.append((time.perf_counter() - t0) * 1000.0)
+            assert json.loads(completed.stdout) == {}
+        elapsed_ms = min(samples_ms)
+        assert elapsed_ms < 100.0, f"Passive {hook_op} min over 5 warm runs took {elapsed_ms:.1f}ms (samples={samples_ms})"
+        assert not paths.admission_path().exists()
 
     # Malformed stdin JSON must still raise rather than silently emitting {}
-    monkeypatch.setattr(sys, "stdin", type("BadIn", (), {"buffer": io.BytesIO(b"{not-json")})())
-    with pytest.raises(ValueError):
-        mindie_launch.main(["hook", "stop"])
+    for hook_op in ("stop", "pre-invocation"):
+        monkeypatch.setattr(sys, "stdin", type("BadIn", (), {"buffer": io.BytesIO(b"{not-json")})())
+        with pytest.raises(ValueError):
+            mindie_launch.main(["hook", hook_op])
 
 
 def test_seed_bundle_verification_and_binary_staging(tmp_path: Path):
@@ -222,10 +229,20 @@ def test_symlinked_metadata_and_diagnostics_supported_ad07(tmp_path: Path):
 
 
 def test_skill_and_domain_docs_free_of_benchmark_and_install_spillover_ad10():
+    import re
+    import yaml
+
     skills_dir = PLUGIN_ROOT / "skills"
     skill_path = skills_dir / "mindie-agent" / "SKILL.md"
     skill_text = skill_path.read_text(encoding="utf-8")
     assert len(skill_text.splitlines()) < 35, "SKILL.md must stay concise (< 35 lines)"
+    frontmatter = skill_text.split("---", 2)[1]
+    parsed_fm = yaml.safe_load(frontmatter)
+    assert isinstance(parsed_fm, dict)
+    assert parsed_fm.get("name") == "mindie-agent"
+    assert parsed_fm.get("disable-slash-command") is True
+    assert "disable-model-invocation" not in parsed_fm
+    assert isinstance(parsed_fm.get("description"), str) and parsed_fm["description"].strip()
 
     relocated_install_docs = ("workspace-setup.md", "github-authentication.md", "user-notice.md")
     for doc_name in relocated_install_docs:
@@ -247,6 +264,24 @@ def test_skill_and_domain_docs_free_of_benchmark_and_install_spillover_ad10():
         content = md_file.read_text(encoding="utf-8")
         for forbidden in forbidden_terms:
             assert forbidden not in content, f"Forbidden spillover {forbidden!r} found in {md_file.relative_to(REPO_ROOT)}"
+
+    slash_cmd_re = re.compile(
+        r"(?<![A-Za-z0-9_./:-])(?<!\})[/\$]mindie-agent(?::mindie-agent)?(?![A-Za-z0-9_./-])"
+    )
+    scan_targets = list(sorted(skills_dir.rglob("*.md")))
+    scan_targets.append(PLUGIN_ROOT / "plugin.json")
+    scan_targets.extend(sorted(REPO_ROOT.glob("README*.md")))
+    for doc_file in sorted((REPO_ROOT / "docs").rglob("*.md")):
+        rel = doc_file.relative_to(REPO_ROOT).as_posix()
+        if rel.startswith(("docs/releases/", "docs/archive/")):
+            continue
+        scan_targets.append(doc_file)
+    for target_file in scan_targets:
+        text = target_file.read_text(encoding="utf-8")
+        match = slash_cmd_re.search(text)
+        assert match is None, (
+            f"Unexpected slash-command token {match.group(0)!r} in {target_file.relative_to(REPO_ROOT)}"
+        )
 
 
 def test_pr_checklist_host_plugin_profile():

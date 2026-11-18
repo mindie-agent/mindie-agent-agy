@@ -71,7 +71,7 @@
         "plugins/mindie-agent/scripts/bridge.py:handle_pre_invocation"
       ],
       "test_ids": [
-        "tests/test_agy_lifecycle.py::test_explicit_mindie_agent_gesture_activates_and_deactivates_lease"
+        "tests/test_agy_lifecycle.py::test_pre_invocation_is_silent_passthrough_and_skill_hides_slash_command"
       ],
       "evidence_refs": [
         "docs/harness-interfaces.md"

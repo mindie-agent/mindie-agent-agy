@@ -6,9 +6,8 @@ and executes graded knowledge operations (`knowledge_query`, `knowledge_explain`
 `knowledge_feedback`, `knowledge_distill`, `knowledge_sync`) for Antigravity.
 
 [Invariants]
-- Knowledge tools are enabled by default whenever the `mindie-agent` plugin is
-  enabled in Antigravity, and reject with `KnowledgeInactive` (`code="knowledge_inactive"`)
-  only when the conversation was explicitly muted via `/mindie-agent deactivate`.
+- Knowledge tools are unconditionally active whenever the `mindie-agent` plugin
+  is enabled in Antigravity, with zero slash-command activation required.
 - Session identity comes from `PreToolUse` / `AGY_CONVERSATION_ID` / `--session`
   (falling back to `"agy-cli-default"` or MCP connection scope), never from
   model-supplied tool arguments.
@@ -21,7 +20,7 @@ and executes graded knowledge operations (`knowledge_query`, `knowledge_explain`
 
 [Side-Effect Policy]
 - `describe` is purely read-only. Tool calls provision a default profile/lease
-  on demand when not muted and connect to the configured `mindie_knowledge` service.
+  on demand and connect to the configured `mindie_knowledge` service.
 """
 
 from __future__ import annotations
@@ -36,18 +35,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from admission import ensure_default_lease, gate, is_deactivated
+from admission import ensure_default_lease, gate
 from identity import require_session, require_session_or_scope
 from paths import admission_path, config_path, engine_config_path, read_json
 
 MAX_INPUT_BYTES = 1024 * 1024
 KNOWLEDGE_RPC_TIMEOUT = 30.0
-
-
-class KnowledgeInactive(ValueError):
-    """The current conversation muted knowledge via `/mindie-agent deactivate`."""
-
-    code = "knowledge_inactive"
 
 
 class LeaseRequired(ValueError):
@@ -213,11 +206,6 @@ def invoke(
     config: str | Path | None = None,
 ) -> dict:
     session_id = require_session_or_scope(session) if session is not None else native_session()
-    if is_deactivated(session_id, config=config):
-        raise KnowledgeInactive(
-            "MindIE knowledge was deactivated for this conversation via /mindie-agent deactivate; "
-            "send /mindie-agent to re-enable"
-        )
     if operation == "describe":
         return dict(tools=KNOWLEDGE_TOOL_SCHEMAS, isError=False)
     if operation not in KNOWLEDGE_NAMES:
@@ -236,7 +224,8 @@ def invoke(
 
     args = dict(arguments or {})
     target_engine = _select_engine_path(config, args)
-    lease = ensure_default_lease(session_id, config=config)
+    lease = ensure_default_lease(session_id, not_before=0.0, config=config)
+    desired_root = lease.get("project_root") or str(Path(os.getcwd()).resolve())
     adm_store = gate(config)
     if target_engine.is_file():
         eng_adm = read_json(target_engine).get("admission_path")
@@ -244,18 +233,23 @@ def invoke(
             from mindie_knowledge.loop.activation import Admission
 
             adm_store = Admission(eng_adm)
-            if adm_store.inspect(session_id).get("status") == "inactive":
-                raise KnowledgeInactive(
-                    "MindIE knowledge was deactivated for this conversation via /mindie-agent deactivate; "
-                    "send /mindie-agent to re-enable"
+            existing_domain_lease = adm_store.knowledge_lease(session_id) if Path(eng_adm).is_file() else None
+            existing_domain_root = existing_domain_lease.get("project_root") if existing_domain_lease else None
+            if (
+                existing_domain_lease is not None
+                and isinstance(existing_domain_root, str)
+                and existing_domain_root
+                and Path(existing_domain_root).resolve() == Path(desired_root).resolve()
+            ):
+                lease = existing_domain_lease
+            else:
+                adm_store.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                lease = adm_store.activate(
+                    session_id,
+                    project_root=str(Path(desired_root).resolve()),
+                    root_session=session_id,
+                    not_before=0.0,
                 )
-            adm_store.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            lease = adm_store.activate(
-                session_id,
-                project_root=lease.get("project_root") or str(Path(os.getcwd()).resolve()),
-                root_session=session_id,
-                not_before=0.0,
-            )
     token = lease.get("token")
 
     from mindie_knowledge.loop.cli import ensure_service
@@ -289,9 +283,10 @@ def invoke(
 
                 value, is_error = result_view(value)
             succeeded = not is_error
+            structured = value if isinstance(value, dict) else {"feeds": value}
             result = dict(
                 content=[dict(type="text", text=json.dumps(value, ensure_ascii=False))],
-                structuredContent=value,
+                structuredContent=structured,
                 isError=is_error,
             )
         except RequestRejected as exc:
@@ -321,19 +316,39 @@ def invoke(
             try:
                 adm_store.finish(session_id, token, succeeded)
             except Exception as exc:
+                if not succeeded and isinstance(exc, TimeoutError):
+                    raise
                 if pending is None:
-                    result["accounting"] = dict(
-                        status="failed",
-                        error_type=type(exc).__name__,
-                        execution="completed",
-                        automatic_retry=False,
-                    )
-                    result["content"].append(
-                        dict(
-                            type="text",
-                            text="Knowledge operation completed; outcome accounting failed. Do not repeat the operation.",
+                    warn = f"{type(exc).__name__}: {exc}"
+                    if succeeded:
+                        structured_out = dict(result.get("structuredContent") or {})
+                        structured_out["receipt_warning"] = warn
+                        structured_out["receipt_unconfirmed"] = True
+                        result["structuredContent"] = structured_out
+                        result["receipt_warning"] = warn
+                        result["receipt_unconfirmed"] = True
+                        result["isError"] = False
+                        result["accounting"] = dict(
+                            status="failed",
+                            error_type=type(exc).__name__,
+                            execution="completed",
+                            automatic_retry=False,
+                            receipt_warning=warn,
+                            receipt_unconfirmed=True,
                         )
-                    )
+                        result["content"].append(
+                            dict(
+                                type="text",
+                                text="Knowledge operation completed; outcome accounting failed. Do not repeat the operation.",
+                            )
+                        )
+                    else:
+                        result["accounting"] = dict(
+                            status="failed",
+                            error_type=type(exc).__name__,
+                            execution="failed",
+                            automatic_retry=False,
+                        )
 
 
 def _format_failure(exc: Exception) -> dict:

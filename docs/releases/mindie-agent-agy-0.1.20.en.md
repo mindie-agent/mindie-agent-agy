@@ -1,0 +1,6 @@
+# mindie-agent-agy 0.1.20: Silent Default-On Operation (`disable-slash-command: true`) and Shared-Runner CI Timing Stabilization
+
+[中文](mindie-agent-agy-0.1.20.md)
+
+- **Hide Slash-Command Menu Entry & Run 100% Silently by Default**: Adds Google Antigravity's native `disable-slash-command: true` frontmatter flag to `plugins/mindie-agent/skills/mindie-agent/SKILL.md` so no `/` slash command is exposed in the chat UI while Antigravity continues loading `SKILL.md` automatically by task context; simplifies `PreInvocation` in `mindie_launch.py` and `bridge.py` to a pure stdlib zero-I/O `{}` pass-through and keeps `knowledge_*` unconditionally active while the plugin is enabled—preserving the frozen `plugins/mindie-agent/hooks.json` SHA-256 (`33b564c7...`) and the `< 100ms` zero-SQLite `Stop` fast-path when community sharing is disabled or outside authorized `project_roots`.
+- **Stabilize Shared `macos-latest` CI Runner Timing Assertions**: Waits for genuine kernel `Z` (`ps -o stat=`) zombie state before testing `waitpid(WNOHANG)` reaping in `test_zombie_in_progress_pid_is_reaped_and_allows_retry`, and evaluates `< 100ms` `Stop` / `PreInvocation` latency over the `min()` of 5 warm runs to eliminate single-sample hypervisor scheduler-steal flakes.

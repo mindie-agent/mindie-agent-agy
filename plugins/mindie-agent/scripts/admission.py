@@ -1,16 +1,15 @@
 """Session lease admission and factual control-plane status for Antigravity.
 
 [Role]
-Wraps `mindie_knowledge.loop.activation.Admission` for default-enabled session
-leases, explicit `/mindie-agent deactivate` muting (`is_deactivated`,
-`ensure_default_lease`, `activate`, `deactivate`, `knowledge_lease`), and
-read-only `status_facts`.
+Wraps `mindie_knowledge.loop.activation.Admission` for unconditionally active
+default session leases (`ensure_default_lease`, `activate`, `knowledge_lease`)
+and read-only `status_facts`.
 
 [Invariants]
-- While the Antigravity plugin is enabled, conversations are active by default
-  unless explicitly muted via `/mindie-agent deactivate` (`enabled == 0`).
-- `knowledge_lease`, `is_deactivated`, and `status_facts` are strictly read-only
-  and never create `admission.sqlite3` or onboard/start background services.
+- While the Antigravity plugin is enabled, conversations are unconditionally
+  active by default (`ensure_default_lease(..., not_before=0.0)`).
+- `knowledge_lease` and `status_facts` are strictly read-only and never create
+  `admission.sqlite3` or onboard/start background services.
 - Damaged community config yields `community_sharing_enabled=None`, never
   `False`. Corrupt/unreadable sharing files set `repair_required=True`.
 
@@ -18,8 +17,8 @@ read-only `status_facts`.
 - Uses `Admission`'s WAL + `5.0s` SQLite busy timeout (`open_database`).
 
 [Side-Effect Policy]
-- `activate`, `ensure_default_lease`, and `deactivate` mutate `admission_path`;
-  `knowledge_lease`, `is_deactivated`, and `status_facts` are side-effect free.
+- `activate` and `ensure_default_lease` mutate `admission_path` on demand;
+  `knowledge_lease` and `status_facts` are side-effect free.
 """
 
 from __future__ import annotations
@@ -52,13 +51,18 @@ def knowledge_lease(session: str, *, config: str | Path | None = None) -> dict |
     return gate(config).knowledge_lease(session)
 
 
-def is_deactivated(session: str, *, config: str | Path | None = None) -> bool:
-    session = require_session_or_scope(session)
-    path = admission_path(config)
-    if not path.is_file():
-        return False
-    info = gate(config).inspect(session)
-    return info.get("status") == "inactive"
+def _prepare_engine_schema(config: str | Path | None = None) -> None:
+    eng_file = engine_config_path(config)
+    if not eng_file.is_file():
+        return
+    try:
+        from mindie_knowledge.loop.handoff import prepare_schema
+
+        prepare_schema(str(eng_file))
+    except TimeoutError:
+        raise
+    except (OSError, ValueError):
+        pass
 
 
 def ensure_default_lease(
@@ -69,17 +73,26 @@ def ensure_default_lease(
     config: str | Path | None = None,
 ) -> dict:
     session = require_session_or_scope(session)
-    if is_deactivated(session, config=config):
-        raise ValueError(
-            "MindIE knowledge is deactivated for this conversation; send /mindie-agent to re-enable"
-        )
+    explicit_root = str(Path(project_root).resolve()) if project_root is not None else None
     existing = knowledge_lease(session, config=config)
     if existing is not None:
-        return existing
-    root = str(Path(project_root or os.getcwd()).resolve())
+        existing_root = existing.get("project_root")
+        if explicit_root is None or (
+            isinstance(existing_root, str)
+            and existing_root
+            and Path(existing_root).resolve() == Path(explicit_root).resolve()
+        ):
+            return existing
+        not_before = (
+            existing["not_before"]
+            if existing.get("not_before") is not None
+            else existing.get("activated_at", 0.0)
+        )
+    root = explicit_root or str(Path(os.getcwd()).resolve())
     adm = gate(config)
     adm.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     lease = adm.activate(session, project_root=root, root_session=session, not_before=not_before)
+    _prepare_engine_schema(config)
     return dict(
         lease,
         enabled=int(bool(lease.get("enabled", 1))),
@@ -134,34 +147,6 @@ def activate(
     )
 
 
-def deactivate(
-    session: str,
-    *,
-    config: str | Path | None = None,
-    project_root: str | Path | None = None,
-) -> dict:
-    session = require_session_or_scope(session)
-    root = str(Path(project_root or os.getcwd()).resolve())
-    adm = gate(config)
-    adm.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if adm.inspect(session).get("status") == "missing":
-        adm.activate(session, project_root=root, root_session=session)
-    adm.deactivate(session)
-    cfg_file = config_path(config)
-    if cfg_file.is_file():
-        adapter = read_json(cfg_file)
-        domain_configs = adapter.get("domain_configs")
-        if isinstance(domain_configs, dict) and domain_configs:
-            from mindie_knowledge.loop.domain_routes import deactivate_registered_domains
-
-            return deactivate_registered_domains(
-                adapter["engine_config"],
-                domain_configs=domain_configs,
-                session=session,
-            )
-    return dict(status="inactive", session=session)
-
-
 def status_facts(session: str | None = None, *, config: str | Path | None = None) -> dict:
     """Return factual control-plane status without onboarding prompts or activation."""
     try:
@@ -207,7 +192,6 @@ def _status_facts_body(session: str | None = None, *, config: str | Path | None 
     if session is not None:
         try:
             norm_session = require_session_or_scope(session)
-            activated = not is_deactivated(norm_session, config=config)
             lease = knowledge_lease(norm_session, config=config)
         except TimeoutError:
             raise

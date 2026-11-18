@@ -85,7 +85,7 @@ def test_knowledge_cli_isolated_mode_and_session_flag_work_cross_platform(tmp_pa
     env.pop("PYTHONPATH", None)
     env.pop("AGY_CONVERSATION_ID", None)
 
-    # Works out-of-the-box without prior /mindie-agent activation
+    # Works out-of-the-box without slash-command activation
     res = bounded.run(
         [sys.executable, "-I", "-X", "utf8", str(cli), "--session", SESSION_ID, "describe"],
         timeout=10.0,
@@ -100,13 +100,14 @@ def test_knowledge_cli_isolated_mode_and_session_flag_work_cross_platform(tmp_pa
         {
             "conversationId": SESSION_ID,
             "workspacePaths": [str(ws)],
-            "lastUserInput": "/mindie-agent check cross-platform knowledge_cli",
+            "lastUserInput": "check cross-platform knowledge_cli",
             "invocationNum": 1,
         }
     )
-    msg = out["injectSteps"][0]["ephemeralMessage"]
-    assert "mindie-tools" in msg
-    assert "AGY_CONVERSATION_ID=" not in msg
+    assert out == {}
+    assert admission.knowledge_lease(SESSION_ID) is None
+    lease = admission.ensure_default_lease(SESSION_ID, ws, not_before=0.0)
+    assert lease["enabled"] == 1
     assert admission.knowledge_lease(SESSION_ID) is not None
 
 
@@ -192,7 +193,7 @@ def test_powershell_activation_syntax_bom_input_proxy_tunnel_and_cleanup_budget(
     import subprocess
     import knowledge_cli
 
-    # 1. Explicit /mindie-agent activation points directly to mindie-tools MCP (zero fragile shell wrappers).
+    # 1. PreInvocation stays silent ({}) and mindie-tools MCP exposes knowledge_query directly (zero shell wrappers).
     ws = tmp_path / "ws_ps"
     ws.mkdir()
     fake_py = tmp_path / "Python 313" / "python.exe"
@@ -204,14 +205,15 @@ def test_powershell_activation_syntax_bom_input_proxy_tunnel_and_cleanup_budget(
         {
             "conversationId": SESSION_ID,
             "workspacePaths": [str(ws)],
-            "lastUserInput": "/mindie-agent verify ps syntax",
+            "lastUserInput": "verify ps syntax",
             "invocationNum": 2,
         },
         config=cfg,
     )
-    msg = out["injectSteps"][0]["ephemeralMessage"]
-    assert "mindie-tools" in msg
-    assert "knowledge_query" in msg
+    assert out == {}
+    import mcp_server
+
+    assert "knowledge_query" in {item["name"] for item in mcp_server.tools_catalog()}
 
     # 2. PowerShell 5.1 UTF-8 BOM (`\xef\xbb\xbf`) accepted by `--input-file`.
     bom_file = tmp_path / "ps51_bom.json"

@@ -35,6 +35,7 @@ from paths import (
     config_path,
     consent_path,
     diagnostics_config_path,
+    engine_config_path,
     read_json,
     which_native,
 )
@@ -254,6 +255,16 @@ def configure_community(
             ),
         )
         consent_store.record_choice(cfile, "contribute")
+        eng_file = engine_config_path(cfg_file)
+        if eng_file.is_file():
+            try:
+                from mindie_knowledge.loop.handoff import prepare_schema
+
+                prepare_schema(str(eng_file))
+            except TimeoutError:
+                raise
+            except (OSError, ValueError):
+                pass
     else:
         consent_store.record_choice(cfile, "disabled")
         updated = settings_mod.write(

@@ -96,7 +96,7 @@ def test_zombie_in_progress_pid_is_reaped_and_allows_retry(tmp_path, monkeypatch
     status_file = paths.data_home() / "component-update-status.json"
     status_file.parent.mkdir(parents=True, exist_ok=True)
     zombie = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + 5.0
     saw_zombie = False
     while time.monotonic() < deadline:
         proc_status = Path(f"/proc/{zombie.pid}/status")
@@ -106,16 +106,24 @@ def test_zombie_in_progress_pid_is_reaped_and_allows_retry(tmp_path, monkeypatch
                 saw_zombie = True
                 break
         else:
-            try:
-                os.kill(zombie.pid, 0)
-                time.sleep(0.05)
+            ps_res = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(zombie.pid)],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+                check=False,
+            )
+            if ps_res.stdout.strip().startswith("Z"):
                 saw_zombie = True
-                break
-            except ProcessLookupError:
                 break
         time.sleep(0.02)
     if not saw_zombie:
-        pytest.skip("could not observe unreaped child")
+        try:
+            zombie.kill()
+            zombie.wait(timeout=1.0)
+        except Exception:
+            pass
+        pytest.skip("could not observe unreaped zombie child")
     os.kill(zombie.pid, 0)
     status_file.write_text(
         json_mod.dumps(
@@ -526,9 +534,11 @@ def test_setup_outer_budget_covers_prep_plus_nested_under_timeout_700(monkeypatc
     assert old_outer < work
 
 
-def test_hook_reexec_timeout_emits_host_readable_json_and_exit_0(monkeypatch, capsys):
+def test_hook_reexec_timeout_emits_host_readable_json_and_exit_0(tmp_path, monkeypatch, capsys):
+    import io
     import subprocess
     import mindie_launch
+    import paths
 
     class TimeoutProc:
         def __init__(self, argv, **kwargs):
@@ -553,6 +563,23 @@ def test_hook_reexec_timeout_emits_host_readable_json_and_exit_0(monkeypatch, ca
     assert denied.get("decision") != "allow"
     assert "TimeoutExpired" in denied["reason"]
 
+    # Configure an opted-in in-scope Stop event so mindie_launch exercises active Stop re-exec
+    ws = tmp_path / "active_ws"
+    ws.mkdir()
+    paths.config_path().parent.mkdir(parents=True, exist_ok=True)
+    paths.config_path().write_text(json.dumps({"python": "/tmp/other-python"}), encoding="utf-8")
+    paths.community_config_path().write_text(
+        json.dumps({"enabled": True, "project_roots": [str(ws.resolve())]}),
+        encoding="utf-8",
+    )
+    paths.consent_path().write_text(json.dumps({"choice": "contribute"}), encoding="utf-8")
+    active_stop_stdin = json.dumps(
+        {
+            "conversationId": "454c6ee9-afea-47be-8188-abb9c7fb1f26",
+            "workspacePaths": [str(ws.resolve())],
+        }
+    ).encode("utf-8")
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(active_stop_stdin), encoding="utf-8"))
     assert mindie_launch.main(["hook", "stop"]) == 0
     stopped = json.loads(capsys.readouterr().out)
     assert stopped.get("decision") != "continue"

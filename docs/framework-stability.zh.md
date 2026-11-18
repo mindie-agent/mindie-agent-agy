@@ -7,8 +7,8 @@
 ## 1. 被动默认（Passive Default）保证
 
 - **`SessionStart`**：始终返回 `{}`，不启动后台服务，不联网同步。
-- **普通 `PreInvocation`**：当用户输入不包含 `/mindie-agent` 时立即返回 `{}`，零注入、零状态变更。
-- **未配置或未开启共享的 `Stop`**：当未配置或未开启社区共享（`sharing_enabled == False`）时在 `< 100ms` 内立即返回 `{}`，不创建 `admission.sqlite3`，不读取会话 Transcript。
+- **`PreInvocation`**：在 `< 100ms` 内纯标准库直接返回 `{}`，零步骤注入、零状态变更、零 SQLite 读写。
+- **未配置、未开启共享或不在授权工作区的 `Stop`**：当未配置、未开启社区共享（`sharing_enabled == False`）或当前工作区不在授权 `project_roots` 内时，在 `< 100ms` 内立即返回 `{}`，不创建 `admission.sqlite3`，不读取会话 Transcript。
 
 ## 2. 跨平台原子读写与 SQLite WAL 纪律
 

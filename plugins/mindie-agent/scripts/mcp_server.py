@@ -8,8 +8,8 @@ diagnostics/mindie_status + default-enabled `knowledge_*` tools).
 [Invariants]
 - While the Antigravity plugin is enabled, `mindie-tools` exposes both deterministic
   component tools and `knowledge_*` tools (`knowledge_query`, `knowledge_explain`,
-  `knowledge_feedback`, `knowledge_distill`, `knowledge_sync`); conversations muted
-  via `/mindie-agent deactivate` reject `knowledge_*` calls with `isError=True`.
+  `knowledge_feedback`, `knowledge_distill`, `knowledge_sync`) unconditionally
+  without requiring slash-command activation.
 - All `mindie-remote-dev` and `mindie-tools` operations work over standard MCP
   `tools/call` with zero pre-call session binding (`PreToolUse` binds and
   `AGY_CONVERSATION_ID` are opportunistic hints, falling back to `_CONNECTION_SESSION_ID`).
