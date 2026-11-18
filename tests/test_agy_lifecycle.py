@@ -1,725 +1,155 @@
-"""Tier 0 & Tier 1 tests for Antigravity hook lifecycle, silent default-enabled leases, and `< 100ms` Stop fast-paths."""
+"""Antigravity hook lifecycle, Stop fast-path, capture, and revocation tests."""
 
 from __future__ import annotations
 
-import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
+
 import pytest
 
-import admission
-import bridge
-import identity
-import setup
+ROOT = Path(__file__).resolve().parents[1]
+PLUGIN = ROOT / "plugins" / "mindie-agent"
+LAUNCHER = PLUGIN / "scripts" / "mindie_launch.py"
+SESSION = "454c6ee9-afea-47be-8188-abb9c7fb1f26"
 
 
-SESSION_A = "454c6ee9-afea-47be-8188-abb9c7fb1f26"
-SESSION_B = "ec33ebf9-0cba-4100-8142-c61503f6c587"
+def _profile():
+    from mindie_harness.paths import ProfileRef
+
+    return ProfileRef.resolve("agy", plugin_root=PLUGIN, config_path=os.environ.get("MINDIE_AGENT_CONFIG"), data_dir=os.environ.get("MINDIE_DATA_HOME"))
 
 
-def test_passive_session_start_and_ordinary_pre_invocation_stay_quiet(tmp_path: Path):
-    import paths
-
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    start_out = bridge.handle_session_start(
-        {
-            "conversationId": SESSION_A,
-            "workspacePaths": [str(workspace)],
-        }
+def _run_stop(payload: dict) -> tuple[dict, float]:
+    started = time.monotonic()
+    proc = subprocess.run(
+        [sys.executable, str(LAUNCHER), "hook", "stop"],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        timeout=15,
+        cwd=str(ROOT),
+        env=dict(os.environ),
     )
-    assert start_out == {}
-    assert not paths.admission_path().exists()
-    assert admission.knowledge_lease(SESSION_A) is None
-
-    pre_out = bridge.handle_pre_invocation(
-        {
-            "conversationId": SESSION_A,
-            "workspacePaths": [str(workspace)],
-            "lastUserInput": "Fix the failing unit test in model_runner.py",
-            "invocationNum": 1,
-        }
-    )
-    assert pre_out == {}
-    assert not paths.admission_path().exists()
-    facts = admission.status_facts(SESSION_A)
-    assert facts["activated"] is True
-    assert not paths.admission_path().exists()
+    elapsed_ms = (time.monotonic() - started) * 1000.0
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout), elapsed_ms
 
 
-def test_pre_invocation_is_silent_passthrough_and_skill_hides_slash_command(tmp_path: Path):
-    import paths
+def _sqlite_files() -> list[Path]:
+    return list(Path(os.environ["MINDIE_DATA_HOME"]).rglob("*.sqlite3"))
 
-    skill_path = Path(__file__).resolve().parents[1] / "plugins" / "mindie-agent" / "skills" / "mindie-agent" / "SKILL.md"
-    frontmatter = skill_path.read_text(encoding="utf-8").split("---", 2)[1]
-    assert "disable-slash-command: true" in frontmatter
 
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+def _configure(profile, tier: str, root: Path) -> None:
+    from mindie_harness.atomic import atomic_write_json
+    from mindie_harness.sharing import configure_sharing
 
-    # PreInvocation is a pure zero-I/O {} pass-through for all user inputs
-    for user_input in (
-        "排查 A3 双 Die HCCL 通信超时",
-        "Show the HCCL ranktable",
-    ):
-        out = bridge.handle_pre_invocation(
-            {
-                "conversationId": SESSION_A,
-                "workspacePaths": [str(workspace)],
-                "lastUserInput": user_input,
-                "invocationNum": 1,
-            }
-        )
-        assert out == {}
-    assert not paths.admission_path().exists()
-    assert admission.status_facts(SESSION_A)["activated"] is True
-    assert admission.status_facts(SESSION_B)["activated"] is True
+    atomic_write_json(profile.config_path, {"engine_config": str(root / "missing.engine.json")})
+    configure_sharing(profile, choice=tier, project_roots=[str(root)])
 
+
+def _write_transcript(root: Path) -> None:
+    logs = root / "brain" / SESSION / ".system_generated" / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    record = {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "created_at": "2026-10-31T08:25:00Z", "content": "<USER_REQUEST>hello</USER_REQUEST>"}
+    (logs / "transcript_full.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+
+def test_session_start_writes_pending_marker_then_stays_quiet() -> None:
+    import bridge
+
+    assert bridge.handle_session_start({"conversationId": SESSION}) == {}
+    marker = Path(os.environ["MINDIE_DATA_HOME"]) / "state" / "agy" / "pending-update-check.json"
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    assert payload["schema"] == "mindie-pending-update/1"
+    assert payload["host"] == "agy"
+    assert not _sqlite_files()
+
+
+def test_pre_invocation_is_silent_passthrough() -> None:
+    import bridge
+
+    assert bridge.handle_pre_invocation({"conversationId": SESSION, "lastUserInput": "排查 A3 HCCL 超时"}) == {}
+    assert bridge.handle_pre_invocation({}) == {}
     with pytest.raises(ValueError, match="JSON object"):
         bridge.handle_pre_invocation(["not-an-object"])  # type: ignore[arg-type]
+    assert not _sqlite_files()
 
-    # Default lease provisioning creates an active lease for SESSION_A without touching SESSION_B
-    stale_dir = tmp_path / "stale_cwd"
-    stale_dir.mkdir()
-    stale_lease = admission.ensure_default_lease(SESSION_A, stale_dir, not_before=0.0)
-    assert Path(stale_lease["project_root"]) == stale_dir.resolve()
-    lease = admission.ensure_default_lease(SESSION_A, workspace, not_before=0.0)
-    assert lease["enabled"] == 1
-    assert lease["entry_enabled"] == 1
-    assert lease["activated_at"] == 0.0
-    assert Path(lease["project_root"]) == workspace.resolve()
-    assert admission.knowledge_lease(SESSION_A) is not None
-    assert admission.knowledge_lease(SESSION_B) is None
 
+def test_pre_tool_use_allows_zero_meta_and_denies_forged_identity() -> None:
+    import bridge
 
-def test_pre_tool_use_binds_mcp_call_and_rejects_replay(tmp_path: Path):
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    args = {"file_path": "/workspace/vllm_ascend/worker.py"}
+    allowed = {"toolCall": {"name": "mcp_mindie-tools_knowledge_query", "args": {"query": "A3 dual-Die"}}}
+    assert bridge.handle_pre_tool_use(allowed) == {"decision": "allow"}
+    forged = {"toolCall": {"name": "mcp_mindie-tools_knowledge_query", "arguments": {"_session_id": "forged"}}}
+    assert bridge.handle_pre_tool_use(forged)["decision"] == "deny"
+    malformed = {"toolCall": {"name": "mcp_mindie-tools_knowledge_query", "args": {"session_id": 7}}}
+    assert bridge.handle_pre_tool_use(malformed)["decision"] == "deny"
+    assert not _sqlite_files()
 
-    hook_res = bridge.handle_pre_tool_use(
-        {
-            "conversationId": SESSION_A,
-            "workspacePaths": [str(workspace)],
-            "stepIdx": 7,
-            "toolCall": {
-                "name": "mcp_mindie-remote-dev_remote_read",
-                "args": args,
-            },
-        }
-    )
-    assert hook_res == {"decision": "allow"}
 
-    claimed = identity.claim_bind("remote", "remote_read", args)
-    assert claimed["session"] == SESSION_A
-    assert claimed["step_idx"] == 7
-    identity.finish_bind(claimed["bind_id"], True)
+def test_cold_disabled_and_out_of_scope_stop_is_fast_and_creates_zero_sqlite(tmp_path: Path) -> None:
+    payload = {"conversationId": SESSION, "workspacePaths": [str(tmp_path / "ws")]}
+    assert _run_stop(payload)[0] == {}
+    assert not _sqlite_files()
 
-    with pytest.raises(ValueError, match="no active PreToolUse bind"):
-        identity.claim_bind("remote", "remote_read", args)
+    import bridge
 
-    # Also verify plugin-namespaced lazy `call_mcp_tool` (`mindie-agent_mindie-tools`)
-    lazy_res = bridge.handle_pre_tool_use(
-        {
-            "conversationId": SESSION_A,
-            "workspacePaths": [str(workspace)],
-            "stepIdx": 8,
-            "toolCall": {
-                "name": "call_mcp_tool",
-                "args": {
-                    "ServerName": "mindie-agent_mindie-tools",
-                    "ToolName": "mindie_status",
-                    "Arguments": {},
-                },
-            },
-        }
-    )
-    assert lazy_res == {"decision": "allow"}
-    claimed_lazy = identity.claim_bind("tools", "mindie_status", {})
-    assert claimed_lazy["session"] == SESSION_A
-    assert claimed_lazy["step_idx"] == 8
-    identity.finish_bind(claimed_lazy["bind_id"], True)
+    profile = _profile()
+    _configure(profile, "disabled", tmp_path / "ws")
+    assert bridge.handle_stop(payload) == {}
+    assert _run_stop(payload)[0] == {}
+    assert not _sqlite_files()
 
-
-def test_stop_never_forces_continuation_and_captures_when_sharing_enabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    import paths
-
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    brain_logs = tmp_path / "gemini" / "antigravity" / "brain" / SESSION_A / ".system_generated" / "logs"
-    brain_logs.mkdir(parents=True)
-    transcript = brain_logs / "transcript.jsonl"
-    transcript.write_text(
-        json.dumps(
-            {
-                "step_index": 0,
-                "source": "USER_EXPLICIT",
-                "type": "USER_INPUT",
-                "status": "DONE",
-                "created_at": "2026-10-31T08:21:33Z",
-                "content": "<USER_REQUEST>\nVerify custom Ascend operator\n</USER_REQUEST>",
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    # 1. Cold unconfigured Stop returns {} in < 100ms (min over 5 warm runs) without creating admission.sqlite3
-    stop_event = {
-        "conversationId": SESSION_A,
-        "workspacePaths": [str(workspace)],
-        "transcriptPath": str(transcript),
-        "executionNum": 1,
-        "terminationReason": "NO_TOOL_CALL",
-    }
-    bridge.handle_stop(stop_event)
-    cold_samples_ms: list[float] = []
-    for _ in range(5):
-        t0 = time.perf_counter()
-        passive_stop = bridge.handle_stop(stop_event)
-        cold_samples_ms.append((time.perf_counter() - t0) * 1000.0)
-        assert passive_stop == {}
-        assert passive_stop.get("decision") != "continue"
-    assert min(cold_samples_ms) < 100.0
-    assert not paths.admission_path().exists()
-
-    # 2. Sharing-disabled Stop also returns {} in < 100ms without creating admission.sqlite3
-    setup.configure_community(enabled=False, project_root=workspace)
-    bridge.handle_stop(stop_event)
-    disabled_samples_ms: list[float] = []
-    for _ in range(5):
-        t1 = time.perf_counter()
-        disabled_stop = bridge.handle_stop(stop_event)
-        disabled_samples_ms.append((time.perf_counter() - t1) * 1000.0)
-        assert disabled_stop == {}
-    assert min(disabled_samples_ms) < 100.0
-    assert not paths.admission_path().exists()
-
-    # 3. Enable community sharing: out-of-scope workspace still short-circuits in < 100ms with zero SQLite writes
-    setup.configure_community(enabled=True, fork="user/knowledge-vllm-ascend", project_root=workspace)
-
-    captured_calls = []
-
-    def fake_capture_hook(engine_cfg, payload):
-        captured_calls.append((engine_cfg, payload))
-        return {"stage": "accepted-local"}
-
-    import mindie_knowledge.loop.cli as cli_mod
-
-    monkeypatch.setattr(cli_mod, "capture_hook", fake_capture_hook)
-
-    other_workspace = tmp_path / "other_ws"
-    other_workspace.mkdir()
-    out_of_scope_event = {
-        "conversationId": SESSION_B,
-        "workspacePaths": [str(other_workspace)],
-        "transcriptPath": str(transcript),
-        "executionNum": 1,
-        "terminationReason": "NO_TOOL_CALL",
-    }
-    bridge.handle_stop(out_of_scope_event)
-    out_of_scope_samples_ms: list[float] = []
-    for _ in range(5):
-        t2 = time.perf_counter()
-        out_of_scope_stop = bridge.handle_stop(out_of_scope_event)
-        out_of_scope_samples_ms.append((time.perf_counter() - t2) * 1000.0)
-        assert out_of_scope_stop == {}
-    assert min(out_of_scope_samples_ms) < 100.0
-    assert not paths.admission_path().exists()
-    assert len(captured_calls) == 0
-
-    # 4. Authorized in-scope conversation captures cleanly by default with not_before=0.0
-    active_stop = bridge.handle_stop(
-        {
-            "conversationId": SESSION_A,
-            "workspacePaths": [str(workspace)],
-            "transcriptPath": str(transcript),
-            "executionNum": 2,
-            "terminationReason": "NO_TOOL_CALL",
-        }
-    )
-    assert active_stop == {}
-    assert active_stop.get("decision") != "continue"
-    assert len(captured_calls) == 1
-    _, forwarded = captured_calls[0]
-    assert forwarded["harness"] == "agy"
-    assert forwarded["session_id"] == SESSION_A
-    assert forwarded["mindie_activation"]
-    assert forwarded["transcript_path"] == str(transcript.resolve())
-    lease = admission.knowledge_lease(SESSION_A)
-    assert lease is not None and lease["activated_at"] == 0.0
-
-    # 5. Missing workspacePaths on Stop returns {} immediately without falling back to stale lease project_root
-    missing_ws_stop = bridge.handle_stop(
-        {
-            "conversationId": SESSION_A,
-            "transcriptPath": str(transcript),
-            "executionNum": 3,
-            "terminationReason": "NO_TOOL_CALL",
-        }
-    )
-    assert missing_ws_stop == {}
-    assert len(captured_calls) == 1
-
-
-def test_first_opted_in_stop_commits_capture_row_without_prior_knowledge_query(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    import sqlite3
-    import mindie_launch
-    from mindie_knowledge.loop import handoff
-    import paths
-
-    workspace = tmp_path / "ws_first_stop"
-    workspace.mkdir()
-    stale_cwd = tmp_path / "mcp_cwd"
-    stale_cwd.mkdir()
-    monkeypatch.chdir(stale_cwd)
-
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    posix_gitleaks = fake_bin / "gitleaks"
-    posix_gitleaks.write_bytes(b"#!/bin/sh\nexit 0\n")
-    if os.name != "nt":
-        posix_gitleaks.chmod(0o755)
-    win_gitleaks = fake_bin / "gitleaks.cmd"
-    win_gitleaks.write_bytes(b"@exit /b 0\r\n")
-    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
-    if os.name == "nt" and ".cmd" not in os.environ.get("PATHEXT", "").lower():
-        monkeypatch.setenv("PATHEXT", os.environ.get("PATHEXT", ".COM;.EXE;.BAT") + ";.CMD")
-
-    brain_logs = tmp_path / "gemini" / "antigravity" / "brain" / SESSION_A / ".system_generated" / "logs"
-    brain_logs.mkdir(parents=True)
-    transcript = brain_logs / "transcript_full.jsonl"
-    transcript.write_text(
-        json.dumps(
-            {
-                "step_index": 0,
-                "source": "USER_EXPLICIT",
-                "type": "USER_INPUT",
-                "status": "DONE",
-                "created_at": "2026-10-31T08:21:33Z",
-                "content": "<USER_REQUEST>\nVerify first Stop schema readiness\n</USER_REQUEST>",
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    # Enable community sharing for workspace (without running any knowledge_query first)
-    setup.configure_community(enabled=True, fork="user/knowledge-vllm-ascend", project_root=workspace)
-
-    # Even if an earlier MCP call created a lease against stale_cwd, Stop realigns project_root to workspace
-    admission.ensure_default_lease(SESSION_A, stale_cwd, not_before=0.0)
-
-    monkeypatch.setattr(
-        handoff,
-        "request_wake",
-        lambda *_a, **_k: {"wake": "not-requested", "runtime": "unavailable", "reason": "committed"},
-    )
-    monkeypatch.setattr(mindie_launch, "_preferred_python", lambda: sys.executable)
-    stop_payload = json.dumps(
-        {
-            "conversationId": SESSION_A,
-            "workspacePaths": [str(workspace)],
-            "transcriptPath": str(transcript),
-            "executionNum": 1,
-            "terminationReason": "NO_TOOL_CALL",
-        }
-    ).encode("utf-8")
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(stop_payload), encoding="utf-8"))
-    assert mindie_launch.main(["hook", "stop"]) == 0
-
-    state_dbs = list(paths.data_home().rglob("state-v4.sqlite3"))
-    assert len(state_dbs) == 1
-    conn = sqlite3.connect(state_dbs[0])
-    try:
-        row_count = conn.execute("SELECT COUNT(*) FROM captures").fetchone()[0]
-    finally:
-        conn.close()
-    assert row_count == 1
-    realigned = admission.knowledge_lease(SESSION_A)
-    assert realigned is not None and Path(realigned["project_root"]) == workspace.resolve()
-
-
-def test_pre_tool_use_bind_failure_denies_with_host_readable_stdout(tmp_path: Path, monkeypatch, capsys):
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    event = {
-        "conversationId": SESSION_A,
-        "workspacePaths": [str(workspace)],
-        "stepIdx": 7,
-        "toolCall": {
-            "name": "mcp_mindie-remote-dev_remote_read",
-            "args": {"file_path": "/workspace/vllm_ascend/worker.py"},
-        },
-    }
-
-    def boom(*_args, **_kwargs):
-        raise OSError(28, "No space left on device")
-
-    monkeypatch.setattr(bridge, "publish_bind", boom)
-    payload = bridge.handle_pre_tool_use(event)
-    assert payload["decision"] == "deny"
-    assert payload.get("decision") != "allow"
-    assert "OSError" in payload["reason"]
-    assert "No space left on device" in payload["reason"]
-
-    monkeypatch.setattr(sys, "stdin", type("Stdin", (), {"buffer": io.BytesIO(json.dumps(event).encode())})())
-    assert bridge.main(["pre-tool-use"]) == 0
-    emitted = json.loads(capsys.readouterr().out)
-    assert emitted["decision"] == "deny"
-    assert emitted.get("decision") != "allow"
-    assert "OSError" in emitted["reason"]
-
-
-def test_pre_tool_use_bind_timeout_denies_with_host_readable_stdout(tmp_path: Path, monkeypatch, capsys):
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    event = {
-        "conversationId": SESSION_A,
-        "workspacePaths": [str(workspace)],
-        "stepIdx": 7,
-        "toolCall": {
-            "name": "mcp_mindie-remote-dev_remote_read",
-            "args": {"file_path": "/workspace/vllm_ascend/worker.py"},
-        },
-    }
-
-    def boom(*_args, **_kwargs):
-        raise TimeoutError("mcp-binds sqlite busy_timeout")
-
-    monkeypatch.setattr(bridge, "publish_bind", boom)
-    payload = bridge.handle_pre_tool_use(event)
-    assert payload["decision"] == "deny"
-    assert payload.get("decision") != "allow"
-    assert "TimeoutError" in payload["reason"]
-    assert "busy_timeout" in payload["reason"]
-
-    monkeypatch.setattr(sys, "stdin", type("Stdin", (), {"buffer": io.BytesIO(json.dumps(event).encode())})())
-    assert bridge.main(["pre-tool-use"]) == 0
-    emitted = json.loads(capsys.readouterr().out)
-    assert emitted["decision"] == "deny"
-    assert emitted.get("decision") != "allow"
-    assert "TimeoutError" in emitted["reason"]
-    assert emitted["reason"]
-
-
-def test_status_facts_does_not_report_corrupt_community_as_disabled():
-    comm = Path(os.environ["MINDIE_AGENT_CONFIG"]).parent / "mindie-community.json"
-    comm.write_text("{not-json", encoding="utf-8")
-    facts = admission.status_facts(SESSION_A)
-    assert facts["community_sharing_enabled"] is None
-    assert facts["community_sharing_enabled"] is not False
-    assert facts["repair_required"] is True
-    assert facts["community_state"] == "corrupt"
-
-
-def test_status_facts_survives_invalid_community_metadata_types():
-    comm = Path(os.environ["MINDIE_AGENT_CONFIG"]).parent / "mindie-community.json"
-    comm.write_text(json.dumps({"enabled": True, "project_roots": 123}), encoding="utf-8")
-    facts = admission.status_facts(SESSION_A)
-    assert facts["repair_required"] is True
-    assert facts["community_state"] == "corrupt"
-    assert facts["community_sharing_enabled"] is None
-
-
-def test_status_facts_survives_community_metadata_permission_error(monkeypatch):
-    import paths as paths_mod
-
-    comm = Path(os.environ["MINDIE_AGENT_CONFIG"]).parent / "mindie-community.json"
-    comm.write_text("{}", encoding="utf-8")
-    real_read = paths_mod.read_json
-
-    def gated_read(path):
-        if Path(path) == comm:
-            raise PermissionError("community metadata not readable")
-        return real_read(path)
-
-    monkeypatch.setattr(admission, "read_json", gated_read)
-    monkeypatch.setattr(setup, "read_json", gated_read)
-    facts = admission.status_facts(SESSION_A)
-    assert facts["community_sharing_enabled"] is None
-    assert facts["community_sharing_enabled"] is not False
-    assert facts["repair_required"] is True
-    assert facts["community_state"] == "unreadable"
-
-
-def test_status_surfaces_survive_stat_permission_error(tmp_path, monkeypatch):
-    import mcp_server
-
-    comm = Path(os.environ["MINDIE_AGENT_CONFIG"]).parent / "mindie-community.json"
-    comm.write_text("{}", encoding="utf-8")
-    orig_stat = Path.stat
-
-    def gated_stat(self, *args, **kwargs):
-        if self.name == "mindie-community.json":
-            raise PermissionError("stat denied")
-        return orig_stat(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "stat", gated_stat)
-    facts = admission.status_facts(SESSION_A)
-    assert facts["community_sharing_enabled"] is None
-    assert facts["community_sharing_enabled"] is not False
-    assert facts["repair_required"] is True
-    assert facts["community_state"] == "unreadable"
-
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    assert (
-        bridge.handle_pre_invocation(
-            {
-                "conversationId": SESSION_A,
-                "workspacePaths": [str(workspace)],
-                "lastUserInput": "check status",
-            }
-        )
-        == {}
-    )
-
-    monkeypatch.setenv("AGY_CONVERSATION_ID", SESSION_A)
-    resp = mcp_server.handle_rpc(
-        {
-            "jsonrpc": "2.0",
-            "id": 11,
-            "method": "tools/call",
-            "params": {"name": "mindie_status", "arguments": {}},
-        },
-        "tools",
-    )
-    assert "error" not in resp
-    mcp_facts = resp["result"]["structuredContent"]
-    assert mcp_facts["repair_required"] is True
-    assert mcp_facts["community_state"] == "unreadable"
-    assert mcp_facts["community_sharing_enabled"] is None
-
-
-def test_hook_launcher_does_not_mask_exceptions_as_empty_success(monkeypatch, capsys):
-    import mindie_launch
-    import bridge as bridge_mod
-
-    monkeypatch.setattr(mindie_launch, "_preferred_python", lambda: None)
-
-    def boom(_argv=None):
-        raise RuntimeError("sqlite bind write failed")
-
-    monkeypatch.setattr(bridge_mod, "main", boom)
-    with pytest.raises(RuntimeError, match="sqlite bind write failed"):
-        mindie_launch.main(["hook", "pre-tool-use"])
-    captured = capsys.readouterr()
-    assert captured.out.strip() != "{}"
-    assert not captured.out.strip().endswith("{}")
-
-
-@pytest.mark.skipif(os.name == "nt", reason="direct-dispatch hook budget uses SIGALRM")
-def test_direct_hook_dispatch_denies_when_bind_exceeds_exec_budget(tmp_path, monkeypatch, capsys):
-    import mindie_launch
-    import bridge as bridge_mod
-
-    monkeypatch.setattr(mindie_launch, "_preferred_python", lambda: None)
-    monkeypatch.setattr(mindie_launch, "HOOK_EXEC_BUDGET", 0.2)
-    monkeypatch.delenv("_MINDIE_AGY_HOOK_BUDGETED", raising=False)
-
-    def slow_bind(*_args, **_kwargs):
-        time.sleep(10.25)
-        return "bind-id"
-
-    monkeypatch.setattr(bridge_mod, "publish_bind", slow_bind)
-    event = {
-        "conversationId": SESSION_A,
-        "workspacePaths": [str(tmp_path)],
-        "stepIdx": 7,
-        "toolCall": {
-            "name": "mcp_mindie-remote-dev_remote_read",
-            "args": {"file_path": "/workspace/vllm_ascend/worker.py"},
-        },
-    }
-    monkeypatch.setattr(sys, "stdin", type("Stdin", (), {"buffer": io.BytesIO(json.dumps(event).encode())})())
+    _configure(profile, "local-only", tmp_path / "other")
     started = time.monotonic()
-    assert mindie_launch.main(["hook", "pre-tool-use"]) == 0
-    elapsed = time.monotonic() - started
-    denied = json.loads(capsys.readouterr().out)
-    assert denied["decision"] == "deny"
-    assert denied.get("decision") != "allow"
-    assert elapsed < 2.0
-    assert elapsed < 10.0
+    assert bridge.handle_stop(payload) == {}
+    assert (time.monotonic() - started) * 1000.0 < 100.0
+    assert not _sqlite_files()
 
 
-def test_session_start_timeout_does_not_continue_to_lease(tmp_path, monkeypatch, capsys):
-    import mindie_launch
-    import bridge as bridge_mod
-
-    monkeypatch.setattr(mindie_launch, "_preferred_python", lambda: None)
-    monkeypatch.delenv("_MINDIE_AGY_HOOK_BUDGETED", raising=False)
-    lease_called: list[bool] = []
-
-    def boom_update(*_args, **_kwargs):
-        raise TimeoutError("updater spawn timed out")
-
-    def mark_lease(*_args, **_kwargs):
-        lease_called.append(True)
-        time.sleep(10.5)
-        return {
-            "enabled": 1,
-            "session": SESSION_A,
-            "project_root": str(tmp_path),
-            "token": "t",
-            "activated_at": 1,
-        }
-
-    monkeypatch.setattr(bridge_mod, "trigger_background_update_if_due", boom_update)
-    monkeypatch.setattr(bridge_mod, "ensure_default_lease", mark_lease)
-    event = {"conversationId": SESSION_A, "workspacePaths": [str(tmp_path)]}
-    monkeypatch.setattr(sys, "stdin", type("Stdin", (), {"buffer": io.BytesIO(json.dumps(event).encode())})())
-    started = time.monotonic()
-    assert mindie_launch.main(["hook", "session-start"]) == 0
-    elapsed = time.monotonic() - started
-    assert elapsed < 2.0
-    assert lease_called == []
-    payload = json.loads(capsys.readouterr().out)
-    assert "injectSteps" in payload
-    assert "TimeoutError" in payload["injectSteps"][0]["ephemeralMessage"]
-
-
-@pytest.mark.skipif(os.name == "nt", reason="direct-dispatch hook budget uses SIGALRM")
-def test_session_start_alarm_does_not_run_unbounded_lease(tmp_path, monkeypatch, capsys):
-    import mindie_launch
-    import bridge as bridge_mod
-
-    monkeypatch.setattr(mindie_launch, "_preferred_python", lambda: None)
-    monkeypatch.setattr(mindie_launch, "HOOK_EXEC_BUDGET", 0.2)
-    monkeypatch.delenv("_MINDIE_AGY_HOOK_BUDGETED", raising=False)
-    lease_called: list[bool] = []
-
-    def slow_update(*_args, **_kwargs):
-        time.sleep(0.35)
-        return False
-
-    def slow_lease(*_args, **_kwargs):
-        lease_called.append(True)
-        time.sleep(10.5)
-        return {
-            "enabled": 1,
-            "session": SESSION_A,
-            "project_root": str(tmp_path),
-            "token": "t",
-            "activated_at": 1,
-        }
-
-    monkeypatch.setattr(bridge_mod, "trigger_background_update_if_due", slow_update)
-    monkeypatch.setattr(bridge_mod, "ensure_default_lease", slow_lease)
-    event = {"conversationId": SESSION_A, "workspacePaths": [str(tmp_path)]}
-    monkeypatch.setattr(sys, "stdin", type("Stdin", (), {"buffer": io.BytesIO(json.dumps(event).encode())})())
-    started = time.monotonic()
-    assert mindie_launch.main(["hook", "session-start"]) == 0
-    elapsed = time.monotonic() - started
-    assert elapsed < 2.0
-    assert lease_called == []
-    payload = json.loads(capsys.readouterr().out)
-    assert "injectSteps" in payload
-
-
-def test_stop_capture_handoff_failure_uses_preinvocation_inject_field(tmp_path: Path, monkeypatch):
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    brain_logs = tmp_path / "gemini" / "antigravity" / "brain" / SESSION_A / ".system_generated" / "logs"
-    brain_logs.mkdir(parents=True)
-    transcript = brain_logs / "transcript.jsonl"
-    transcript.write_text(
-        json.dumps(
-            {
-                "step_index": 0,
-                "source": "USER_EXPLICIT",
-                "type": "USER_INPUT",
-                "status": "DONE",
-                "created_at": "2026-10-31T08:21:33Z",
-                "content": "<USER_REQUEST>\nVerify custom Ascend operator\n</USER_REQUEST>",
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    setup.configure_community(enabled=True, fork="user/knowledge-vllm-ascend", project_root=workspace)
-
-    import mindie_knowledge.loop.cli as cli_mod
-
-    def boom(_engine_cfg, _payload):
-        raise RuntimeError("engine unavailable")
-
-    monkeypatch.setattr(cli_mod, "capture_hook", boom)
-    failed_stop = bridge.handle_stop(
-        {
-            "conversationId": SESSION_A,
-            "workspacePaths": [str(workspace)],
-            "transcriptPath": str(transcript),
-            "executionNum": 2,
-            "terminationReason": "NO_TOOL_CALL",
-        }
-    )
-    assert failed_stop.get("decision") != "continue"
-    assert "systemMessage" not in failed_stop
-    assert "injectSteps" in failed_stop
-    warning = failed_stop["injectSteps"][0]["ephemeralMessage"]
-    assert "RuntimeError" in warning
-    assert "engine unavailable" in warning
-
-
-def test_stop_timeout_uses_inject_steps_instead_of_empty_stdout(tmp_path: Path, monkeypatch):
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    brain_logs = tmp_path / "gemini" / "antigravity" / "brain" / SESSION_A / ".system_generated" / "logs"
-    brain_logs.mkdir(parents=True)
-    transcript = brain_logs / "transcript.jsonl"
-    transcript.write_text("{}\n", encoding="utf-8")
-    setup.configure_community(enabled=True, fork="user/knowledge-vllm-ascend", project_root=workspace)
-
-    def boom(*_args, **_kwargs):
-        raise TimeoutError("transcript read timed out")
-
-    monkeypatch.setattr(bridge, "capture_source", boom)
-    failed_stop = bridge.handle_stop(
-        {
-            "conversationId": SESSION_A,
-            "workspacePaths": [str(workspace)],
-            "transcriptPath": str(transcript),
-            "executionNum": 2,
-            "terminationReason": "NO_TOOL_CALL",
-        }
-    )
-    assert failed_stop.get("decision") != "continue"
-    assert "systemMessage" not in failed_stop
-    assert "injectSteps" in failed_stop
-    warning = failed_stop["injectSteps"][0]["ephemeralMessage"]
-    assert "TimeoutError" in warning
-    assert "transcript read timed out" in warning
-
-
-def test_session_start_updater_spawn_failure_stays_host_readable(tmp_path: Path, monkeypatch):
-    import subprocess
+def test_stop_never_forces_continuation_and_captures_only_in_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import bridge
 
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    monkeypatch.delenv("MINDIE_CONFIG_HOME", raising=False)
-    cfg = Path(os.environ["MINDIE_AGENT_CONFIG"])
-    cfg.write_text(json.dumps({"python": sys.executable}), encoding="utf-8")
+    _write_transcript(workspace)
+    profile = _profile()
+    seen: list[dict] = []
+    import mindie_knowledge.loop.cli as cli
 
-    def boom(*_args, **_kwargs):
-        raise OSError("cannot spawn updater")
+    monkeypatch.setattr(cli, "capture_hook", lambda path, forwarded, timeout=None: seen.append(dict(forwarded)))
+    payload = {"conversationId": SESSION, "workspacePaths": [str(workspace)], "appDataDir": str(workspace)}
+    for tier in ("local-only", "contribute"):
+        _configure(profile, tier, workspace)
+        result = bridge.handle_stop(payload)
+        assert result == {}
+        assert "decision" not in result
+        assert len(seen) == (1 if tier == "local-only" else 2)
+        assert seen[-1]["harness"] == "agy"
+        assert seen[-1]["session_id"] == SESSION
+        assert seen[-1]["transcript_path"].endswith("transcript_full.jsonl")
+        assert seen[-1]["mindie_activation"]
 
-    monkeypatch.setattr(subprocess, "Popen", boom)
-    start_out = bridge.handle_session_start(
-        {
-            "conversationId": SESSION_A,
-            "workspacePaths": [str(workspace)],
-        }
-    )
-    assert start_out.get("decision") != "continue"
-    assert "injectSteps" in start_out
-    warning = start_out["injectSteps"][0]["ephemeralMessage"]
-    assert "OSError" in warning
-    assert "cannot spawn updater" in warning
+
+def test_stop_preserves_explicit_revocation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import bridge
+    from mindie_knowledge.loop.activation import Admission
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _write_transcript(workspace)
+    profile = _profile()
+    _configure(profile, "local-only", workspace)
+    Admission(str(profile.admission_db)).activate(SESSION, project_root=str(workspace), root_session=SESSION, not_before=0.0)
+    assert Admission(str(profile.admission_db)).deactivate(SESSION) is True
+    seen: list[dict] = []
+    import mindie_knowledge.loop.cli as cli
+
+    monkeypatch.setattr(cli, "capture_hook", lambda *args, **kwargs: seen.append({"args": args}))
+    assert bridge.handle_stop({"conversationId": SESSION, "workspacePaths": [str(workspace)], "appDataDir": str(workspace)}) == {}
+    assert seen == []
+    assert Admission(str(profile.admission_db)).inspect(SESSION)["status"] == "inactive"

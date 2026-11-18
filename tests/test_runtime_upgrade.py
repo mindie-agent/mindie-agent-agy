@@ -1,217 +1,96 @@
-"""Tier 3: a formal old runtime keeps serving until a compatible pair activates."""
-import asyncio
-import io
+"""Setup read-only guarantees, profile lifecycle, and harness generation rebinding."""
+
+from __future__ import annotations
+
 import json
 import os
 from pathlib import Path
-import re
-import shutil
-import stat
-import subprocess
 import sys
-import tarfile
-import time
 
-import anyio
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 import pytest
-import setup
-from bounded import run
-from paths import config_path, state_dir
-
-pytestmark = pytest.mark.skipif(
-    os.environ.get("MINDIE_TEST_RUNTIME_UPGRADE") != "1",
-    reason="explicit old-runtime acceptance requires MINDIE_TEST_RUNTIME_UPGRADE=1")
 
 ROOT = Path(__file__).resolve().parents[1]
-IS_AGY = ROOT.name.endswith("agy")
-HOST = "AGY" if IS_AGY else "WB"
-OLD_TAG = "v0.1.6" if IS_AGY else "v0.1.5"
-OLD_TARGETS = {
-    "mindie-knowledge": ("knowledge", "1840bd4e238e718676768489058917818d18cd3c"),
-    "remote-dev": ("remote-dev", "131b24533479e9cefc572144adccdcb345f70846"),
-    "mindie-coordinator": ("coordinator", "14d7cec7247bdcbea9b9878db4770e3a05a6ea41"),
-    "mindie-sim": ("sim", "dbadff04b60937a0722b0a227cdad01beed083cd"),
-}
-_PREWARMED_UV_CACHE = os.environ.get("UV_CACHE_DIR")
+PLUGIN = ROOT / "plugins" / "mindie-agent"
+SCRIPTS = PLUGIN / "scripts"
 
 
-def test_old_runtime_pair_survives_prepare_failure_and_upgrades(tmp_path, monkeypatch, request):
-    budget_seconds = 240.0 if os.name == "nt" else 120.0
-    deadline = time.monotonic() + budget_seconds
-    # Use pytest's isolated tmp_path. Never create a sibling under ROOT.parent:
-    # that pollutes the developer's checkout parent with mindie-upgrade-* dirs.
+def _config() -> Path:
+    return Path(os.environ["MINDIE_AGENT_CONFIG"])
 
-    def _force_writable(_func, target_path, _exc):
-        try:
-            os.chmod(target_path, stat.S_IWRITE | stat.S_IREAD)
-            _func(target_path)
-        except TimeoutError:
-            raise
-        except OSError:
-            pass
 
-    def clean_native_directory():
-        resolved = tmp_path.resolve()
-        assert resolved != ROOT.resolve()
-        assert not resolved.is_relative_to(ROOT.parent.resolve())
-        if not resolved.exists():
-            return
-        # Component generations contain long third-party package paths and read-only git packfiles on Windows.
-        raw = str(resolved)
-        rm_target = (raw if raw.startswith("\\\\?\\") else f"\\\\?\\{raw}") if os.name == "nt" else resolved
-        if sys.version_info >= (3, 12):
-            shutil.rmtree(rm_target, onexc=_force_writable)
-        else:
-            shutil.rmtree(rm_target, onerror=_force_writable)
+def test_setup_help_and_dry_run_are_read_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import setup
 
-    request.addfinalizer(clean_native_directory)
-    home, config_home, data_home = (tmp_path / name for name in ("home", "config", "data"))
-    for path in (home, config_home, data_home):
-        path.mkdir(parents=True, exist_ok=True)
-    for name, value in {
-        "HOME": home, "USERPROFILE": home, "MINDIE_CONFIG_HOME": config_home,
-        "MINDIE_DATA_HOME": data_home, "MINDIE_AGENT_CONFIG": config_home / f"{HOST.lower()}.json",
-        "MINDIE_DIAGNOSTICS_ROOT": data_home / "diagnostics",
-        "MINDIE_DIAGNOSTICS_CONFIG": config_home / "diagnostics.json",
-        "TMPDIR": tmp_path, "TEMP": tmp_path, "TMP": tmp_path,
-    }.items():
-        monkeypatch.setenv(name, str(value))
-    if _PREWARMED_UV_CACHE:
-        monkeypatch.setenv("UV_CACHE_DIR", _PREWARMED_UV_CACHE)
-    monkeypatch.delenv("MINDIE_AGY_SOURCE_ROOT", raising=False)
-    monkeypatch.delenv("MINDIE_WB_SOURCE_ROOT", raising=False)
+    monkeypatch.setenv("MINDIE_REDACTOR_EXECUTABLE", str(tmp_path / "bin" / "gitleaks"))
+    for argv in (["--help"], ["-h"], ["--dry-run", "init"], ["--dry", "init"], ["--dry-run", "sharing", "--enable"]):
+        assert setup.main(argv) == 0
+    assert not _config().exists()
+    assert not _config().with_name("agy.engine.json").exists()
+    assert not (_config().parent / "mindie-consent.json").exists()
+    assert not (_config().parent / "mindie-community.json").exists()
 
-    def invoke(command, stdin="", *, cwd=None):
-        remaining = deadline - time.monotonic()
-        assert remaining > 0, f"old-runtime acceptance exceeded its {budget_seconds}s budget"
-        result = run([str(arg) for arg in command], stdin, timeout=remaining,
-                     max_output=256 * 1024, env=dict(os.environ), cwd=cwd)
-        assert result.returncode == 0, result.stderr + result.stdout
-        return result.stdout
 
-    monkeypatch.delenv(f"_MINDIE_{HOST}_REEXEC", raising=False)
-    monkeypatch.delenv(f"_MINDIE_{HOST}_SETUP_BOOTSTRAPPED", raising=False)
-    monkeypatch.setenv("REMOTE_DEV_AUTH_DIR", str(tmp_path / "auth"))
-    monkeypatch.setenv("REMOTE_DEV_STATE_DIR", str(tmp_path / "remote"))
-    monkeypatch.setenv(f"{HOST}_CONVERSATION_ID", "454c6ee9-afea-47be-8188-abb9c7fb1f26")
-    if os.name == "nt":
-        count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
-        for offset, (key, value) in enumerate((("http.sslBackend", "schannel"), ("core.longpaths", "true"))):
-            monkeypatch.setenv(f"GIT_CONFIG_KEY_{count + offset}", key)
-            monkeypatch.setenv(f"GIT_CONFIG_VALUE_{count + offset}", value)
-        monkeypatch.setenv("GIT_CONFIG_COUNT", str(count + 2))
-    old_python = os.environ.get("MINDIE_TEST_OLD_RUNTIME")
-    if not old_python:
-        # Use real formal component sources with the CI interpreter's pinned
-        # third-party cohort. No installed user host supplies the test runtime.
-        frozen = invoke(["uv", "pip", "freeze", "--python", sys.executable]).splitlines()
-        requirements = []
-        for line in frozen:
-            name = re.split(r"[ =@<>&]", line, maxsplit=1)[0].lower()
-            if name.startswith("mindie-agent-") or name == "mindie-bench":
-                continue
-            if name in OLD_TARGETS:
-                repository, sha = OLD_TARGETS[name]
-                line = f"{name} @ git+https://github.com/mindie-agent/{repository}@{sha}"
-            requirements.append(line)
-        req = tmp_path / "old-requirements.txt"
-        req.write_text("\n".join(requirements) + "\n", encoding="utf-8")
-        # The native plugins already override older transitive declarations.
-        overrides = tmp_path / "old-overrides.txt"
-        overrides.write_text("\n".join(line for line in requirements if " @ git+" in line) + "\n",
-                             encoding="utf-8")
-        venv = tmp_path / "old-venv"
-        invoke(["uv", "venv", str(venv), "--python", sys.executable])
-        old_python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-        invoke(["uv", "--no-config", "pip", "install", "--python", old_python,
-                "-r", req, "--overrides", overrides])
-    version = invoke([old_python, "-I", "-X", "utf8", "-c",
-                      "import importlib.metadata as m; print(m.version('remote-dev'))"]).strip()
-    assert version == "0.11.5"
-    archive = subprocess.check_output(
-        ["git", "archive", OLD_TAG],
-        cwd=ROOT,
-        timeout=10,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+def test_setup_init_sharing_and_release_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import setup
+
+    monkeypatch.setenv("MINDIE_REDACTOR_EXECUTABLE", str(tmp_path / "bin" / "gitleaks"))
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    assert setup.main(["init", "--domain", "vllm-ascend"]) == 0
+    adapter = json.loads(_config().read_text(encoding="utf-8"))
+    engine = json.loads(_config().with_name("agy.engine.json").read_text(encoding="utf-8"))
+    assert adapter["harness"] == "antigravity"
+    assert adapter["python"] == sys.executable
+    assert adapter["runtime_scripts"] == str(SCRIPTS)
+    assert adapter["source_root"] == str(PLUGIN)
+    assert adapter["product_validation"]["status"] == "validated"
+    assert engine["transcript_adapter"] == str(SCRIPTS / "agy_transcript.py")
+    assert engine["redactor_executable"] == str(tmp_path / "bin" / "gitleaks")
+
+    assert setup.main(["sharing", "--status"]) == 0
+    assert setup.main(["sharing", "--local-only", "--project-root", str(workspace)]) == 0
+    consent = json.loads((_config().parent / "mindie-consent.json").read_text(encoding="utf-8"))
+    community = json.loads((_config().parent / "mindie-community.json").read_text(encoding="utf-8"))
+    assert consent["choice"] == "local-only" and community["local_only"] is True
+    assert setup.main(["sharing", "--enable", "--project-root", str(workspace)]) == 0
+    consent = json.loads((_config().parent / "mindie-consent.json").read_text(encoding="utf-8"))
+    assert consent["choice"] == "contribute"
+    assert json.loads((_config().parent / "mindie-community.json").read_text(encoding="utf-8"))["enabled"] is True
+    assert setup.main(["sharing", "--disable"]) == 0
+    assert json.loads((_config().parent / "mindie-consent.json").read_text(encoding="utf-8"))["choice"] == "disabled"
+    assert json.loads((_config().parent / "mindie-community.json").read_text(encoding="utf-8"))["enabled"] is False
+    assert setup.main(["release-metadata"]) == 0
+
+
+def test_harness_generation_activation_and_native_rebinding(tmp_path: Path) -> None:
+    from mindie_harness.api import activate_runtime
+    from mindie_harness.atomic import atomic_write_json
+    from mindie_harness.mcp.gateway import rebind_native_plugin_if_needed
+    from mindie_harness.paths import ProfileRef
+    from mindie_harness.runtime.builder import PreparedGeneration
+
+    profile = ProfileRef.resolve("agy", plugin_root=PLUGIN, config_path=str(_config()), data_dir=os.environ.get("MINDIE_DATA_HOME"))
+    generation = profile.generations_dir / "gen-1"
+    generation.mkdir(parents=True)
+    atomic_write_json(generation / "runtime.json", {"schema": "mindie-candidate-check/1", "validation": {"status": "validated"}, "python": sys.executable})
+    prepared = PreparedGeneration(
+        status="validated", generation_key="gen-1", generation_dir=generation,
+        python_path=Path(sys.executable), receipt_path=generation / "runtime.json", components={},
     )
-    legacy = tmp_path / "legacy"
-    legacy.mkdir()
-    with tarfile.open(fileobj=io.BytesIO(archive)) as packed:
-        packed.extractall(legacy, filter="data")
-    # The native directory stays under the isolated pytest temp tree, so the
-    # v0.1.6 installer intentionally binds the staged payload scripts; the
-    # upgrade assertions below accept that temp-install branch.
-    native = home / ".gemini/config/plugins/mindie-agent"
-    shutil.copytree(legacy / "plugins/mindie-agent", native)
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))
-    monkeypatch.setenv(f"{HOST}_PLUGIN_ROOT", str(native))
-    scripts = native / "scripts"
-    config = config_path()
-    invoke([old_python, "-I", "-X", "utf8", scripts / "setup.py", "init", "--config", config], cwd=legacy)
-    old_profile = json.loads(config.read_text(encoding="utf-8"))
-    old_profile["user_setting"] = "preserve"
-    config.write_text(json.dumps(old_profile), encoding="utf-8")
-    if IS_AGY:
-        # pytest's tmp_path is inside the OS temp tree, where the v0.1.6
-        # installer deliberately rebinds runtime_scripts to the staged payload
-        # instead of the native directory. The native directory is still the
-        # source that was staged and verified.
-        staged_scripts = Path(old_profile["source_root"]) / "plugins/mindie-agent/scripts"
-        assert Path(old_profile["runtime_scripts"]).resolve() == staged_scripts.resolve()
-        assert (staged_scripts / "mindie_launch.py").is_file()
-    retained_scripts = Path(old_profile["source_root"]) / "plugins/mindie-agent/scripts"
-    before = config.read_bytes()
-    previous_payload = (retained_scripts / "mcp_server.py").read_bytes()
-    job_state = tmp_path / "remote/existing-job"
-    job_state.parent.mkdir(parents=True, exist_ok=True)
-    job_state.write_text("owned job remains unchanged", encoding="utf-8")
-    new_launcher = scripts / "mindie_launch.py"
+    activated = activate_runtime(profile, prepared, run_gc=False)
+    assert activated.status == "active"
+    adapter = json.loads(_config().read_text(encoding="utf-8"))
+    assert adapter["component_release"] == str(generation)
+    assert adapter["python"] == sys.executable
 
-    def status(launcher):
-        async def conversation():
-            remaining = deadline - time.monotonic()
-            assert remaining > 0, f"old-runtime acceptance exceeded its {budget_seconds}s budget"
-            parameters = StdioServerParameters(
-                command=str(old_python), args=["-I", "-X", "utf8", str(launcher), "mcp", "remote"],
-                env=dict(os.environ))
-            with anyio.fail_after(remaining):
-                async with stdio_client(parameters) as (read, write):
-                    async with ClientSession(read, write) as session:
-                        await session.initialize()
-                        result = await session.call_tool(
-                            "remote_auth", dict(host="auth.example", port=22, action="status"),
-                            meta={"workbuddy.ai/conversationId": "454c6ee9-afea-47be-8188-abb9c7fb1f26"})
-                        assert result.isError is False, result
-                        await session.send_ping()
-        asyncio.run(conversation())
-
-    status(scripts / "mindie_launch.py")
-    shutil.copytree(ROOT / "plugins/mindie-agent", native, dirs_exist_ok=True)
-    status(new_launcher)  # New native entry serves the profile's previous pair.
-
-    def reject_candidate(*args, **kwargs):
-        raise RuntimeError("candidate preparation rejected")
-    with monkeypatch.context() as fault:
-        fault.setattr(setup, "ensure_runtime_python", reject_candidate)
-        with pytest.raises(RuntimeError, match="candidate preparation rejected"):
-            setup.ensure_default_profile(config=config)
-    assert config.read_bytes() == before
-    assert (retained_scripts / "mcp_server.py").read_bytes() == previous_payload
-    status(new_launcher)
-
-    invoke([old_python, "-I", "-X", "utf8", ROOT / "plugins/mindie-agent/scripts/setup.py",
-            "init", "--config", config])
-    active = json.loads(config.read_text(encoding="utf-8"))
-    assert Path(active["python"]) != Path(old_python)
-    assert active["runtime_scripts"] != str(scripts)
-    assert active["user_setting"] == "preserve"
-    assert active["state_dir"] == old_profile["state_dir"]
-    assert (retained_scripts / "mcp_server.py").read_bytes() == previous_payload
-    assert job_state.read_text(encoding="utf-8") == "owned job remains unchanged"
-    invoke([active["python"], "-I", "-X", "utf8", "-c",
-            "from remote_dev.mcp.outcome import operation_outcome"])
-    status(new_launcher)
-
+    adapter["product_validation"] = {"native_version": "0.1.20"}
+    adapter["runtime_scripts"] = str(tmp_path / "old-scripts")
+    adapter["component_commands"] = {"profiler": [sys.executable, "-I", "-X", "utf8", "-m", "mindie_profiler"]}
+    atomic_write_json(_config(), adapter)
+    rebound = rebind_native_plugin_if_needed(profile, native_version="0.1.21", runtime_scripts=SCRIPTS)
+    assert rebound["status"] == "rebound"
+    updated = json.loads(_config().read_text(encoding="utf-8"))
+    assert updated["product_validation"]["native_version"] == "0.1.21"
+    assert updated["runtime_scripts"] == str(SCRIPTS)
+    assert updated["source_root"] == str(PLUGIN)
+    assert updated["component_commands"]["profiler"] == [sys.executable, "-I", "-X", "utf8", "-m", "mindie_profiler"]

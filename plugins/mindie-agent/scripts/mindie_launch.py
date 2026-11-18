@@ -1,392 +1,234 @@
-"""Stable entrypoint invoked by Antigravity `hooks.json` and `mcp_config.json`.
-
+"""Pure-stdlib entrypoint for Antigravity hooks, MCP, setup, update, and doctor.
 [Role]
-Dispatches Antigravity lifecycle hooks (`hook session-start`, `hook pre-invocation`,
-`hook pre-tool-use`, `hook stop`), stdio MCP servers (`mcp remote`, `mcp tools`),
-and setup commands (`setup ...`) under explicit timeout budgets.
-
+Dispatches `hook session-start|pre-invocation|pre-tool-use|stop`, `mcp remote|
+tools`, and `setup`/`update`/`doctor`/`sharing`. Hooks are fast-pathed in pure
+stdlib before `bridge` loads; cold launches use the verified seed bundle.
 [Invariants]
-- Enforces `HOOK_TOTAL = 10.0s >= HOOK_EXEC_BUDGET (8.0s) + CLEANUP_GRACE (2.0s)`;
-  over-budget hooks emit host JSON (`PreToolUse` deny; others `injectSteps`) and exit 0.
-- Never emits `{}` with exit 0 on hook failure, and re-execs into the configured
-  profile interpreter on MCP/hook launch so runtime imports resolve deterministically.
-
+- Zero third-party imports at import time; hook fast-paths never import
+  `mindie_harness`, open SQLite, or read a transcript.
+- `hook stop` NEVER emits `"decision": "continue"`; unconfigured, disabled, or
+  out-of-scope calls emit `{}`.
+- The seed is streamed in 64 KiB chunks against `mindie-harness-seed/1`.
+- SessionStart's sibling temp file is always removed in `finally`.
 [Timeouts & Locks]
-- `HOOK_EXEC_BUDGET = 8.0s`, `HOOK_CLEANUP_GRACE = 2.0s`, `HOOK_TOTAL = 10.0s`,
-  `HOOK_LOCK_BUDGET = 2.0s`, `HOOK_UV_STARTUP = 5.0s`, `HOOK_OUTER_SECONDS = 15`.
-- Hook re-exec uses `timeout=HOOK_EXEC_BUDGET`; setup outer covers sequential prep +
-  nested re-exec (`inner + (inner + CLEANUP_GRACE) + CLEANUP_GRACE`); update uses
-  `inner + 2 * CLEANUP_GRACE`; MCP stdio is unbounded. Timed re-exec kills the
-  process tree (POSIX group / Windows Job) before emitting JSON.
-
+- Hook re-exec `15s`; cold provisioning `300s`; resident MCP is unbounded.
 [Side-Effect Policy]
-- Delegates hook and MCP execution to `bridge.py`, `mcp_server.py`, and `setup.py`.
+- Writes only `state/agy/pending-update-check.json`; never mutates the host Antigravity data directory.
 """
-
 from __future__ import annotations
-
-import io
-import json
-import os
+import hashlib, importlib.util, io, json, os
 from pathlib import Path
-import subprocess
-import sys
-
-HERE = Path(__file__).resolve().parent
-if str(HERE) not in sys.path:
-    sys.path.insert(0, str(HERE))
-
-from paths import apply_enterprise_transport_env, config_path, data_home, read_json
-
-HOOK_EXEC_BUDGET = 8.0
-HOOK_CLEANUP_GRACE = 2.0
-HOOK_TOTAL = HOOK_EXEC_BUDGET + HOOK_CLEANUP_GRACE
-HOOK_LOCK_BUDGET = 2.0
-HOOK_UV_STARTUP = 5.0
-HOOK_OUTER_SECONDS = int(HOOK_TOTAL + HOOK_UV_STARTUP)
-BOOTSTRAP_TOTAL = 540.0
-BOOTSTRAP_CLEANUP_GRACE = 5.0
-
-
-def _norm_python_path(py_exe: str | Path) -> Path:
-    p = Path(py_exe).expanduser()
-    return p.parent.resolve() / p.name
-
-
-def _is_venv_python(py: str) -> bool:
-    if not isinstance(py, str):
-        return False
-    norm = py.replace("\\", "/")
-    return bool(
-        ("venv" in norm or ".venv" in norm)
-        and "/uv/python/" not in norm
-        and "/Cellar/python" not in norm
-        and Path(py).is_file()
-    )
-
-
-def _preferred_python() -> str | None:
-    cfg = config_path()
-    if cfg.is_file():
-        try:
-            py = read_json(cfg).get("python")
-            if _is_venv_python(py):
-                return str(_norm_python_path(py))
-        except ValueError:
-            pass
-    agy_venv = data_home() / "agy-venv"
-    for candidate in (agy_venv / "Scripts" / "python.exe", agy_venv / "bin" / "python"):
-        if candidate.is_file():
-            return str(_norm_python_path(candidate))
-    ws_venv = HERE.parent.parent.parent.parent / ".venv"
-    for candidate in (ws_venv / "Scripts" / "python.exe", ws_venv / "bin" / "python"):
-        if candidate.is_file():
-            return str(_norm_python_path(candidate))
-    search_dirs = [cfg.parent]
-    host_cfg_dir = Path.home() / ".config" / "mindie-agent"
-    if host_cfg_dir not in search_dirs:
-        search_dirs.append(host_cfg_dir)
-    for cdir in search_dirs:
-        for sibling_cfg in ("agy.json", "wb.json", "codex.json", "cc.json", "kimi.json"):
-            scfg = cdir / sibling_cfg
-            if scfg.is_file():
-                try:
-                    py = read_json(scfg).get("python")
-                    if _is_venv_python(py):
-                        return str(_norm_python_path(py))
-                except ValueError:
-                    pass
-    return None
-
-
-def _reexec_stdio(stream):
+import subprocess, sys, tempfile, time
+CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path: sys.path.insert(0, str(SCRIPTS_DIR))
+PLUGIN_ROOT = SCRIPTS_DIR.parent
+MAX_HOOK_BYTES = 1024 * 1024
+HOOK_TIMEOUT = 15.0
+SEED_TIMEOUT = 300.0
+def _home(config: bool) -> Path:
+    raw = os.environ.get("MINDIE_CONFIG_HOME" if config else "MINDIE_DATA_HOME")
+    if raw: return Path(raw).expanduser()
+    base = Path(os.environ.get("APPDATA" if config else "LOCALAPPDATA") or Path.home() / ("AppData/Roaming" if config else "AppData/Local")) if os.name == "nt" else Path(os.environ.get("XDG_CONFIG_HOME" if config else "XDG_DATA_HOME") or Path.home() / (".config" if config else ".local/share"))
+    return base / "mindie-agent"
+def cfg_path() -> Path:
+    raw = os.environ.get("MINDIE_AGENT_CONFIG")
+    return Path(raw).expanduser() if raw else _home(True) / "agy.json"
+def state_dir() -> Path:
+    return _home(False) / "state" / "agy"
+def _read_json(path: Path) -> dict | None:
+    try: raw = Path(path).read_bytes() if Path(path).is_file() else None
+    except TimeoutError: raise
+    except OSError: return None
+    try: doc = json.loads(raw.decode("utf-8-sig")) if raw is not None else None
+    except (UnicodeDecodeError, ValueError): return None
+    return doc if isinstance(doc, dict) else None
+def _norm(value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    return path.parent.resolve() / path.name
+def verify_seed_bundle(plugin_dir: str | Path | None = None) -> dict:
+    """Verify `assets/mindie-harness-seed.pyz` against its `mindie-harness-seed/1` lock."""
+    root = Path(plugin_dir).expanduser() if plugin_dir is not None else PLUGIN_ROOT
+    if not (root / "assets").is_dir() and (root.parent / "assets").is_dir(): root = root.parent
+    try: lock = json.loads((root / "assets/seed-lock.json").read_bytes().decode("utf-8-sig"))
+    except TimeoutError: raise
+    except (OSError, ValueError) as exc: raise ValueError(f"Invalid seed lock file: {root}") from exc
+    if not isinstance(lock, dict) or lock.get("schema") != "mindie-harness-seed/1":
+        raise ValueError("Invalid mindie-harness-seed/1 lock document")
+    sha, size = str(lock.get("sha256") or "").lower(), lock.get("size_bytes")
+    if len(sha) != 64 or type(size) is not int or size <= 0:
+        raise ValueError("Invalid mindie-harness-seed/1 lock document")
+    digest, total, pyz = hashlib.sha256(), 0, root / "assets/mindie-harness-seed.pyz"
     try:
-        if os.name == "nt":
-            import msvcrt
-
-            if msvcrt.get_osfhandle(stream.fileno()) in (-1, -2, 0):
-                return subprocess.DEVNULL
-        else:
-            stream.fileno()
-        return stream
-    except Exception:
-        return subprocess.DEVNULL
-
-
-def _parse_cli_timeout(argv: list[str]) -> float | None:
-    for index, token in enumerate(argv):
-        raw = None
-        if token == "--timeout" and index + 1 < len(argv):
-            raw = argv[index + 1]
-        elif token.startswith("--timeout="):
-            raw = token.split("=", 1)[1]
-        if raw is None:
-            continue
-        try:
-            value = float(raw)
-        except ValueError:
-            return None
-        return value if value > 0 else None
+        with pyz.open("rb") as stream:
+            while chunk := stream.read(65536):
+                digest.update(chunk); total += len(chunk)
+    except TimeoutError: raise
+    except OSError as exc: raise ValueError(f"Seed archive is unreadable: {pyz}") from exc
+    if total != size or digest.hexdigest() != sha: raise ValueError(f"Seed integrity mismatch for {pyz}")
+    return lock
+def _cli_cfg(argv: list[str]) -> Path:
+    for idx, tok in enumerate(argv):
+        if tok == "--config" and idx + 1 < len(argv) and not argv[idx + 1].startswith("-"): return Path(argv[idx + 1]).expanduser()
+        if tok.startswith("--config="): return Path(tok.split("=", 1)[1]).expanduser()
+    return cfg_path()
+def _readonly_cli(role: str, argv: list[str]) -> bool:
+    if any(tok in {"-h", "--help"} or tok.startswith("--help=") or (tok.startswith("--dry") and "--dry-run".startswith(tok)) for tok in argv): return True
+    return (role == "sharing" or argv[:2] == ["setup", "sharing"]) and ("--status" in argv or not any(f in argv for f in ("--enable", "--local-only", "--disable")))
+def _active_python(target_cfg: Path | None = None) -> str | None:
+    cfg = _read_json(target_cfg or cfg_path()) or {}
+    raw = cfg.get("python")
+    if isinstance(raw, str) and Path(raw).expanduser().is_file(): return str(_norm(raw))
+    release = cfg.get("component_release")
+    if isinstance(release, str) and release:
+        base = Path(release).expanduser()
+        receipt = _read_json(base / "runtime.json" if base.is_dir() else base) or {}
+        validation, found = receipt.get("validation"), receipt.get("python")
+        if isinstance(validation, dict) and validation.get("status") == "validated" and isinstance(found, str) and Path(found).is_file(): return str(_norm(found))
+    try: importable = importlib.util.find_spec("mindie_harness") is not None
+    except (ImportError, AttributeError, ValueError): importable = False
+    return sys.executable if importable else None
+def _emit(payload: dict) -> None:
+    sys.stdout.buffer.write((json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")); sys.stdout.buffer.flush()
+def _read_hook() -> tuple[dict, bytes]:
+    raw = sys.stdin.buffer.read(MAX_HOOK_BYTES + 1)
+    if len(raw) > MAX_HOOK_BYTES: raise ValueError("native hook payload exceeds 1 MiB")
+    if not raw.strip(): return {}, raw
+    event = json.loads(raw.decode("utf-8-sig"))
+    if not isinstance(event, dict): raise ValueError("native hook payload must be a JSON object")
+    return event, raw
+def _workspace(event: dict) -> str | None:
+    extra = event.get("workspacePaths")
+    for value in [event.get(key) for key in ("workspaceRoot", "workspace_root", "cwd", "directory", "project_root")] + (extra if isinstance(extra, list) else []):
+        if isinstance(value, str) and os.path.isabs(value): return str(Path(value).expanduser().resolve())
     return None
-
-
-def _setup_outer_budget(inner: float) -> float:
-    """Wall-clock for sequential `ensure_runtime_python` then nested setup re-exec."""
-    nested = inner + BOOTSTRAP_CLEANUP_GRACE
-    return inner + nested + BOOTSTRAP_CLEANUP_GRACE
-
-
-def _timeout_role_budget(role: str, argv: list[str] | None = None) -> float | None:
-    if role == "hook":
-        return HOOK_EXEC_BUDGET
-    requested = _parse_cli_timeout(argv or [])
-    inner = BOOTSTRAP_TOTAL if requested is None else requested
-    if role == "setup":
-        return _setup_outer_budget(inner)
-    if role == "update":
-        return inner + (2 * BOOTSTRAP_CLEANUP_GRACE)
-    return None
-
-
-def _run_hook_with_exec_budget(argv: list[str], rest: list[str]) -> int:
-    """Bound in-process hook dispatch to HOOK_EXEC_BUDGET (POSIX SIGALRM)."""
-    import signal
-    import bridge
-
-    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
-        return bridge.main(rest)
-
-    def _on_alarm(_signum, _frame):
-        raise TimeoutError(f"hook exec exceeded HOOK_EXEC_BUDGET={HOOK_EXEC_BUDGET}s")
-
-    previous = signal.getsignal(signal.SIGALRM)
-    signal.signal(signal.SIGALRM, _on_alarm)
-    try:
-        signal.setitimer(signal.ITIMER_REAL, float(HOOK_EXEC_BUDGET))
+def _in_scope(candidate: str, roots: list) -> bool:
+    try: target = os.path.normcase(str(Path(candidate).expanduser().resolve()))
+    except TimeoutError: raise
+    except (OSError, ValueError): return False
+    for root in roots:
+        if not isinstance(root, str) or not os.path.isabs(root): continue
         try:
-            return int(bridge.main(rest))
-        except TimeoutError as exc:
-            return _emit_reexec_timeout(argv, exc)
-    finally:
-        try:
-            signal.setitimer(signal.ITIMER_REAL, 0.0)
-        finally:
-            signal.signal(signal.SIGALRM, previous)
-
-
-def _emit_reexec_timeout(argv: list[str], exc: BaseException) -> int:
-    detail = f"{argv[0]} reexec exceeded timeout: {type(exc).__name__}: {exc}"
-    print(f"MindIE {detail}", file=sys.stderr)
-    if argv[0] == "hook":
-        op = argv[1] if len(argv) > 1 else ""
-        payload = (
-            {"decision": "deny", "reason": detail}
-            if op == "pre-tool-use"
-            else {"injectSteps": [{"ephemeralMessage": detail}]}
-        )
-        sys.stdout.buffer.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
-        sys.stdout.buffer.flush()
-        return 0
-    return 1
-
-
-def _norm_scope_path(raw: str | Path) -> Path:
-    resolved = str(Path(raw).expanduser().resolve(strict=False))
-    if os.name == "nt":
-        resolved = os.path.normcase(resolved.removeprefix("\\\\?\\"))
-    return Path(resolved)
-
-
-def _is_passive_stop(event: dict) -> bool:
-    from identity import session_from_hook, workspace_from_hook
-
-    try:
-        session_from_hook(event)
-        workspace_root = workspace_from_hook(event)
-    except ValueError:
-        return True
-    cfg = config_path()
-    if not cfg.is_file():
-        return True
-    from setup_sharing import sharing_status
-
-    share = sharing_status(cfg, read_json_fn=read_json)
-    enabled = share.get("sharing_enabled")
-    if enabled is False:
-        return True
-    if enabled is True:
-        roots = share.get("project_roots") or []
-        if not roots:
-            return True
-        ws_norm = _norm_scope_path(workspace_root)
-        for root in roots:
-            if not isinstance(root, str) or not root.strip():
-                continue
-            try:
-                if ws_norm.is_relative_to(_norm_scope_path(root)):
-                    return False
-            except TimeoutError:
-                raise
-            except (OSError, ValueError):
-                continue
-        return True
+            root_norm = os.path.normcase(str(Path(root).expanduser().resolve()))
+            if os.path.splitdrive(target)[0] == os.path.splitdrive(root_norm)[0] and os.path.commonpath([target, root_norm]) == root_norm: return True
+        except TimeoutError: raise
+        except (OSError, ValueError): continue
     return False
-
-
-def _reexec(
-    target_py: str,
-    target_script: Path,
-    argv: list[str],
-    env: dict,
-    *,
-    input_bytes: bytes | None = None,
-) -> int:
-    from bounded import _attach_windows_job, _close_windows_job, _kill_process_tree
-
-    timeout = _timeout_role_budget(argv[0], argv)
-    cmd = [target_py, "-I", "-X", "utf8", str(target_script), *argv]
-    popen_kwargs: dict = {"env": env}
-    if os.name == "nt":
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        if timeout is not None:
-            flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        popen_kwargs["creationflags"] = flags
-        if input_bytes is None:
-            popen_kwargs["stdin"] = _reexec_stdio(sys.stdin)
-        popen_kwargs["stdout"] = _reexec_stdio(sys.stdout)
-        popen_kwargs["stderr"] = _reexec_stdio(sys.stderr)
-    elif timeout is not None:
-        popen_kwargs["start_new_session"] = True
+def _passive_stop(event: dict) -> bool:
+    cfg = _read_json(cfg_path())
+    if cfg is None: return True
+    base, consent = cfg_path().parent, cfg.get("consent_config")
+    consent = _read_json(Path(consent) if isinstance(consent, str) and os.path.isabs(consent) else base / "mindie-consent.json") or {}
+    if consent.get("choice") not in {"contribute", "local-only"}: return True
+    community, comm_raw = None, cfg.get("community_config")
+    community = _read_json(Path(comm_raw) if isinstance(comm_raw, str) and os.path.isabs(comm_raw) else base / "mindie-community.json") or {}
+    roots, candidate = community.get("project_roots"), _workspace(event)
+    if community.get("enabled") is not True or not isinstance(roots, list) or not roots or candidate is None: return True
+    return not _in_scope(candidate, roots)
+def _tool_call(event: dict) -> tuple[str, dict]:
+    call = event.get("toolCall") or event.get("tool_call")
+    if not isinstance(call, dict): return "", {}
+    args = call.get("arguments") if isinstance(call.get("arguments"), dict) else call.get("args")
+    args = dict(args) if isinstance(args, dict) else {}
+    name = call.get("name")
+    if name == "call_mcp_tool":
+        name = args.get("ToolName") or args.get("tool_name") or args.get("tool") or ""
+        inner = args.get("Arguments") or args.get("arguments")
+        args = dict(inner) if isinstance(inner, dict) else args
+    return name if isinstance(name, str) else "", args
+def _forged(tool: str, args: dict) -> bool:
+    if any(key in args for key in ("_session_id", "_activation", "mindie_activation")): return True
+    session = args.get("session_id")
+    return "knowledge_" in tool and session is not None and (not isinstance(session, str) or not session.strip() or len(session) > 256)
+def _write_pending() -> None:
+    target = state_dir() / "pending-update-check.json"; target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, raw = tempfile.mkstemp(prefix=f".{target.name}.tmp.", dir=str(target.parent)); temp = Path(raw)
     try:
-        if timeout is None:
-            run_kw = dict(popen_kwargs)
-            if input_bytes is not None:
-                run_kw["input"] = input_bytes
-            return int(subprocess.run(cmd, **run_kw).returncode)
-        if input_bytes is not None:
-            popen_kwargs["stdin"] = subprocess.PIPE
-        proc = subprocess.Popen(cmd, **popen_kwargs)
-        job = _attach_windows_job(proc, kill_on_close=(argv[0] != "hook"))
-        try:
-            if input_bytes is not None and hasattr(proc, "communicate"):
-                proc.communicate(input=input_bytes, timeout=timeout)
-                return int(proc.returncode or 0)
-            return int(proc.wait(timeout=timeout))
-        except (subprocess.TimeoutExpired, TimeoutError) as exc:
-            _kill_process_tree(proc, job, wait_timeout=min(0.5, HOOK_CLEANUP_GRACE))
-            job = None
-            return _emit_reexec_timeout(argv, exc)
-        finally:
-            if job is not None:
-                _close_windows_job(job)
-    except (subprocess.TimeoutExpired, TimeoutError) as exc:
-        return _emit_reexec_timeout(argv, exc)
-
-
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(json.dumps({"schema": "mindie-pending-update/1", "host": "agy", "reason": "hook_handoff", "requested_at": time.time()}, sort_keys=True).encode("utf-8") + b"\n")
+            stream.flush(); os.fsync(stream.fileno())
+        os.replace(temp, target)
+    finally:
+        temp.unlink(missing_ok=True)
+def _bridge(rest: list[str], raw: bytes | None = None) -> int:
+    import bridge
+    previous = sys.stdin
+    if raw is not None: sys.stdin = io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8")
+    try: return int(bridge.main(rest))
+    finally: sys.stdin = previous
+def _reexec(python: str, argv: list[str], raw: bytes | None = None) -> int:
+    command = [python, "-I", "-X", "utf8", str(Path(__file__).resolve()), *argv]
+    env = dict(os.environ, _MINDIE_AGY_REEXEC="1")
+    try: sys.stdin.fileno(); sys.stdout.fileno(); sys.stderr.fileno(); io_kw = {"stdin": sys.stdin, "stdout": sys.stdout, "stderr": sys.stderr}
+    except Exception: io_kw = {}
+    try:
+        if raw is not None: return int(subprocess.run(command, input=raw, env=env, timeout=HOOK_TIMEOUT if argv and argv[0] == "hook" else None, creationflags=CREATE_NO_WINDOW).returncode)
+        if argv and argv[0] == "hook": return int(subprocess.run(command, **io_kw, env=env, timeout=HOOK_TIMEOUT, creationflags=CREATE_NO_WINDOW).returncode)
+        return int(subprocess.run(command, **io_kw, env=env, creationflags=CREATE_NO_WINDOW).returncode)
+    except subprocess.TimeoutExpired:
+        print(f"MindIE {argv[0]} re-exec exceeded {HOOK_TIMEOUT}s", file=sys.stderr)
+        _emit({"decision": "deny"} if argv[:2] == ["hook", "pre-tool-use"] else {}); return 0
+    except TimeoutError: raise
+    except OSError as exc:
+        print(f"MindIE {argv[0]} re-exec failed: {type(exc).__name__}", file=sys.stderr); return 1
+def _provision(argv: list[str]) -> int:
+    verify_seed_bundle(PLUGIN_ROOT)
+    target_cfg = _cli_cfg(argv)
+    parent = PLUGIN_ROOT.parents[1]
+    provision_root = parent if (parent / "pyproject.toml").is_file() else PLUGIN_ROOT
+    try:
+        proc = subprocess.run([sys.executable, str(PLUGIN_ROOT / "assets/mindie-harness-seed.pyz"), "--host", "agy", "--plugin-root", str(provision_root), "--config", str(target_cfg)], capture_output=True, text=True, timeout=SEED_TIMEOUT, creationflags=CREATE_NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        print("MindIE cold provisioning exceeded its time budget", file=sys.stderr); return 1
+    except TimeoutError: raise
+    except OSError as exc:
+        print(f"MindIE cold provisioning failed: {type(exc).__name__}", file=sys.stderr); return 1
+    if proc.returncode != 0:
+        print(f"MindIE cold provisioning exited {proc.returncode}", file=sys.stderr); return 1
+    lines = (proc.stdout or "").strip().splitlines()
+    try: payload = json.loads(lines[-1]) if lines else {}
+    except ValueError: payload = {}
+    python = payload.get("python") if isinstance(payload, dict) else None
+    if not isinstance(python, str) or not Path(python).is_file(): python = _active_python(target_cfg)
+    if python is None:
+        print("MindIE cold provisioning reported no interpreter", file=sys.stderr); return 1
+    return _reexec(python, argv)
 def main(argv: list[str] | None = None) -> int:
-    apply_enterprise_transport_env()
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
-        raise SystemExit("mindie_launch requires a subcommand: hook | mcp | setup | update")
-
-    stop_raw: bytes | None = None
-    try:
-        if argv == ["hook", "pre-invocation"]:
-            from identity import MAX_HOOK_BYTES, parse_hook
-
-            parse_hook(sys.stdin.buffer.read(MAX_HOOK_BYTES + 1))
-            sys.stdout.buffer.write(b"{}\n")
-            sys.stdout.buffer.flush()
-            return 0
-        if argv == ["hook", "stop"]:
-            from identity import MAX_HOOK_BYTES, parse_hook
-
-            stop_raw = sys.stdin.buffer.read(MAX_HOOK_BYTES + 1)
-            stop_event = parse_hook(stop_raw)
-            if _is_passive_stop(stop_event):
-                sys.stdout.buffer.write(b"{}\n")
-                sys.stdout.buffer.flush()
-                return 0
-        target_py = _preferred_python()
-        target_script = Path(__file__).resolve()
-        if argv[0] in {"hook", "mcp"} and config_path().is_file():
-            # The profile activates interpreter and payload together. A newly
-            # downloaded native entry must keep serving the previous generation
-            # until installation has prepared and activated its replacement.
-            active = read_json(config_path())
-            active_python = active.get("python")
-            active_scripts = active.get("runtime_scripts")
-            validation = active.get("product_validation") or {}
-            expected_version = validation.get("native_version")
-            retained = active.get("source_root")
-            directories = ([Path(retained) / "plugins/mindie-agent/scripts"]
-                           if isinstance(retained, str) else [])
-            if isinstance(active_scripts, str):
-                directories.append(Path(active_scripts))
-            if isinstance(active_python, str) and Path(active_python).is_file():
-                for directory in directories:
-                    manifest = directory.parent / "plugin.json"
-                    paired_script = directory / "mindie_launch.py"
-                    if (manifest.is_file() and paired_script.is_file()
-                            and read_json(manifest).get("version") == expected_version):
-                        target_py = str(_norm_python_path(active_python))
-                        target_script = paired_script.resolve()
-                        break
-                else:
-                    raise RuntimeError("active plugin payload does not match its recorded version")
-        if (
-            target_py is not None
-            and (_norm_python_path(sys.executable) != _norm_python_path(target_py)
-                 or target_script != Path(__file__).resolve())
-        ):
-            env = dict(os.environ)
-            env["_MINDIE_AGY_REEXEC"] = "1"
-            env["PYTHONIOENCODING"] = "utf-8"
-            env["PYTHONUTF8"] = "1"
-            if argv[0] in {"hook", "mcp"}:
-                env["AGY_PLUGIN_ROOT"] = str(target_script.parent.parent)
-            if argv[0] == "hook":
-                env["_MINDIE_AGY_HOOK_BUDGETED"] = "1"
-            return _reexec(target_py, target_script, argv, env, input_bytes=stop_raw)
-    except TimeoutError as exc:
-        return _emit_reexec_timeout(argv, exc)
-
-    role = argv[0]
-    rest = argv[1:]
+        print("usage: mindie_launch.py {hook|mcp|setup|update|doctor|sharing} ...", file=sys.stderr); return 2
+    role, rest = argv[0], argv[1:]
     if role == "hook":
-        import bridge
-
-        budgeted = os.environ.get("_MINDIE_AGY_HOOK_BUDGETED") == "1"
-        if os.name == "nt" and not budgeted and os.environ.get("_MINDIE_AGY_REEXEC") != "1":
-            env = dict(os.environ)
-            env["_MINDIE_AGY_HOOK_BUDGETED"] = "1"
-            env["_MINDIE_AGY_REEXEC"] = "1"
-            env["PYTHONIOENCODING"] = "utf-8"
-            env["PYTHONUTF8"] = "1"
-            return _reexec(sys.executable, Path(__file__).resolve(), argv, env, input_bytes=stop_raw)
-        prev_stdin = sys.stdin
-        if stop_raw is not None:
-            sys.stdin = io.TextIOWrapper(io.BytesIO(stop_raw), encoding="utf-8")
+        op = rest[0] if rest else ""
         try:
-            if os.name != "nt" and not budgeted:
-                return _run_hook_with_exec_budget(argv, rest)
-            return bridge.main(rest)
-        finally:
-            sys.stdin = prev_stdin
+            if op == "pre-invocation": _read_hook(); _emit({}); return 0
+            if op == "pre-tool-use":
+                tool, args = _tool_call(_read_hook()[0])
+                _emit({"decision": "deny", "reason": "forged session identity"} if _forged(tool, args) else {"decision": "allow"}); return 0
+            if op == "session-start": _read_hook(); _write_pending(); _emit({}); return 0
+            if op == "stop":
+                event, raw = _read_hook()
+                if _passive_stop(event): _emit({}); return 0
+                python = _active_python()
+                if python is not None and _norm(python) != _norm(sys.executable): return _reexec(python, ["hook", "stop"], raw)
+                return _bridge(["stop"], raw)
+        except TimeoutError: raise
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"; print(f"MindIE hook skipped: {detail}", file=sys.stderr)
+            _emit({"decision": "deny", "reason": detail} if op == "pre-tool-use" else {}); return 0
+        return _bridge(rest)
+    python = _active_python(_cli_cfg(argv))
+    if python is None and not (role in {"setup", "update", "doctor", "sharing"} and _readonly_cli(role, argv)):
+        return _provision(argv)
+    if python is not None and _norm(python) != _norm(sys.executable): return _reexec(python, argv)
     if role == "mcp":
+        if rest and rest[0] not in {"remote", "tools"}:
+            print(f"unsupported MCP surface: {rest[0]}", file=sys.stderr); return 2
         import mcp_server
-
         return mcp_server.main(rest)
-    if role == "setup":
+    if role in {"setup", "update", "doctor", "sharing"}:
         import setup
-
-        return setup.main(rest)
-    if role == "update":
-        import component_update
-
-        return component_update.main(rest)
-    raise SystemExit(f"unknown mindie_launch role: {role}")
-
-
+        return setup.main(argv if role == "setup" else [role, *rest])
+    print(f"unknown mindie_launch role: {role}", file=sys.stderr); return 2
 if __name__ == "__main__":
     raise SystemExit(main())
