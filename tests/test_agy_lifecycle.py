@@ -281,6 +281,18 @@ def test_first_opted_in_stop_commits_capture_row_without_prior_knowledge_query(
     stale_cwd.mkdir()
     monkeypatch.chdir(stale_cwd)
 
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    posix_gitleaks = fake_bin / "gitleaks"
+    posix_gitleaks.write_bytes(b"#!/bin/sh\nexit 0\n")
+    if os.name != "nt":
+        posix_gitleaks.chmod(0o755)
+    win_gitleaks = fake_bin / "gitleaks.cmd"
+    win_gitleaks.write_bytes(b"@exit /b 0\r\n")
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    if os.name == "nt" and ".cmd" not in os.environ.get("PATHEXT", "").lower():
+        monkeypatch.setenv("PATHEXT", os.environ.get("PATHEXT", ".COM;.EXE;.BAT") + ";.CMD")
+
     brain_logs = tmp_path / "gemini" / "antigravity" / "brain" / SESSION_A / ".system_generated" / "logs"
     brain_logs.mkdir(parents=True)
     transcript = brain_logs / "transcript_full.jsonl"
