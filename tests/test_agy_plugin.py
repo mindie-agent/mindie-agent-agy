@@ -71,7 +71,7 @@ def test_seed_bundle_verifies_and_rejects_tampering(tmp_path: Path) -> None:
 
     lock = mindie_launch.verify_seed_bundle(PLUGIN)
     assert lock["schema"] == "mindie-harness-seed/1"
-    assert lock["version"] == "0.1.3"
+    assert lock["version"] == "0.1.4"
     copied = tmp_path / "plugin"
     shutil.copytree(PLUGIN / "assets", copied / "assets")
     pyz = copied / "assets" / "mindie-harness-seed.pyz"

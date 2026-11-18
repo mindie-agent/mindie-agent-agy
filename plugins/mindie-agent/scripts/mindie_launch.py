@@ -160,7 +160,8 @@ def _reexec(python: str, argv: list[str], raw: bytes | None = None) -> int:
     command = [python, "-I", "-X", "utf8", str(Path(__file__).resolve()), *argv]
     env = dict(os.environ, _MINDIE_AGY_REEXEC="1")
     try: sys.stdin.fileno(); sys.stdout.fileno(); sys.stderr.fileno(); io_kw = {"stdin": sys.stdin, "stdout": sys.stdout, "stderr": sys.stderr}
-    except Exception: io_kw = {}
+    except TimeoutError: raise
+    except (AttributeError, OSError, ValueError): io_kw = {}
     try:
         if raw is not None: return int(subprocess.run(command, input=raw, env=env, timeout=HOOK_TIMEOUT if argv and argv[0] == "hook" else None, creationflags=CREATE_NO_WINDOW).returncode)
         if argv and argv[0] == "hook": return int(subprocess.run(command, **io_kw, env=env, timeout=HOOK_TIMEOUT, creationflags=CREATE_NO_WINDOW).returncode)
