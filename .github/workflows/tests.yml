@@ -39,11 +39,6 @@ jobs:
           MINDIE_CONFIG_HOME="$SMOKE_ROOT/cfg" \
           MINDIE_DATA_HOME="$SMOKE_ROOT/data" \
           MINDIE_DIAGNOSTICS_ROOT="$SMOKE_ROOT/diag" \
-          python3 -I "$SMOKE_ROOT/plugin/plugins/mindie-agent/scripts/host_adapter.py" --help >/dev/null 2>&1 || true
-          HOME="$SMOKE_ROOT/home" \
-          MINDIE_CONFIG_HOME="$SMOKE_ROOT/cfg" \
-          MINDIE_DATA_HOME="$SMOKE_ROOT/data" \
-          MINDIE_DIAGNOSTICS_ROOT="$SMOKE_ROOT/diag" \
           python3 -I - "$SMOKE_ROOT/plugin/plugins/mindie-agent" <<'PY'
           import hashlib, json, subprocess, sys, time
           from pathlib import Path
@@ -52,8 +47,8 @@ jobs:
           assert len(hooks) == 979
           assert hashlib.sha256(hooks).hexdigest() == "33b564c78b439205fd4acfe095c83b15770043ff462d636e2a89f14620cdfc3f"
           sys.path.insert(0, str(plugin_dir / "scripts"))
-          import host_adapter
-          lock = host_adapter.verify_seed_bundle(plugin_dir)
+          import mindie_launch
+          lock = mindie_launch.verify_seed_bundle(plugin_dir)
           assert lock["schema"] == "mindie-harness-seed/1"
           t0 = time.monotonic()
           proc = subprocess.run(

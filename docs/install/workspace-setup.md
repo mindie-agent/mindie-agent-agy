@@ -1,84 +1,48 @@
 # Development workspace setup
 
-Run this flow during normal installation and first-use setup, immediately after
-presenting the existing MindIE Agent user notice. The offer is part of setup even
-when contribution is disabled. Reuse the user's creation, initialization and
-registration decisions; ordinary tasks and updates do not repeat onboarding.
+Run this flow during normal installation and first-use setup. The offer is part of setup even when contribution is disabled. Reuse the user's creation, initialization, and registration decisions; ordinary tasks and updates do not repeat onboarding.
 
-1. Recommend [mindie-agent/vllm-ascend-workspace](https://github.com/mindie-agent/vllm-ascend-workspace.git).
-   During Step 5 of installation (or when `setup.py sharing --status` reports
-   `needs_onboarding_prompt: true`), call Antigravity's native **`ask_question`**
-   tool in the user's language (`is_multi_select: false`, first option prefixed
-   with `(Recommended)`) to ask the 3 onboarding questions together:
-   - Local Development Workspace `vllm-ascend-workspace`:
-     `(Recommended) 在当前目录初始化 vllm-ascend-workspace` / `(Recommended) Initialize vllm-ascend-workspace in current directory` vs `继续使用当前目录作为工作区` / `Keep current directory as workspace` vs `指定已有工作区目录` / `Use an existing workspace directory`
-   - Community Knowledge Sharing & Automated Fault Reporting:
-     `(Recommended) 开启社区共享与故障上报` / `(Recommended) Enable Community Sharing & Fault Reporting` vs `仅保持本地模式` / `Keep Local-Only Mode`
-   - `顺手给 MindIE Agent 点个 GitHub Star 吗？ ⭐` / `Would you like to give mindie-agent a Star on GitHub ⭐?`:
-     `(Recommended) 好，点个 Star ⭐` / `(Recommended) Sure, star it ⭐` vs `先不用` / `Maybe later`
-   Obtain the destination when needed and explain that the selected workspace
-   will also be added to the current client's native project/workspace entry.
-   An installation choice includes this registration; do not ask again whether
-   to register it. If the user keeps the current directory without scaffold
-   setup, finish the offer and retain that directory as `WORKSPACE_ROOT`.
-2. Before downloads or fork setup, follow [GitHub Sign-In](github-authentication.md).
-   Reuse authentication already verified during plugin installation. Otherwise
-   offer browser login or token creation/input, preferring tokens on enterprise
-   networks. A GitHub username alone does not establish authentication.
-3. For a new directory, run
-   `git clone https://github.com/mindie-agent/vllm-ascend-workspace.git "<destination>"`.
-   For reuse, inspect the selected checkout first. Preserve existing files and
-   configuration. Report clone failures with the actual path and result; inspect
-   an interrupted clone before retrying it. Keeping the current directory needs
-   no scaffold installation or unrelated configuration changes.
-4. Once the selected workspace exists, register/open its absolute root through
-   the current harness's native project controls. Follow the checkout's
-   `.agents/harness-workspace.md` when available and the native entry below.
-   Reuse an existing record for the same path. Do this even when the user defers
-   source initialization. Confirm the native path before reporting completion;
-   a child-shell `cd` or filesystem access grant is not project registration.
-5. If initialization was not already decided, offer it now for a new or reused
-   scaffold that needs it. On approval, read its `AGENTS.md`, `README.md` and
-   `.agents/scripts/README.md`. Use the checked-out initializer:
-   `uv run --no-project --python 3.13 python .agents/scripts/repo_init.py --no-input` reuses saved `workspace.json`
-   fork selections. For first setup using the verified account's existing forks,
-   use `uv run --no-project --python 3.13 python .agents/scripts/repo_init.py --github-user <account> --no-input`.
-   The initializer configures forks; it does not create GitHub forks. Resolve
-   missing forks within the requested setup and keep existing personal remotes.
-   Do not replace this flow with manual submodule commands or copying the sample
-   configuration over the user's file.
-6. After resolving `WORKSPACE_ROOT`, persist the user's sharing choice via
-   `uv run --no-project --python 3.13 python "<plugin_root>/scripts/setup.py" sharing --enable --project-root "$WORKSPACE_ROOT"`
-   (or `--disable`), and if the user chose to Star `mindie-agent/mindie-agent`, run
-   `gh api --hostname github.com --silent -X PUT /user/starred/mindie-agent/mindie-agent`.
-   Report the path, native registration/open status and initialization status
-   separately. Resume a failed initialization in the same workspace. Contribution
-   settings retain their approved scope; workspace installation does not enable
-   sharing or expand that scope.
+## 1. One-line install
 
-## Native entry
+Ask the Agent to run:
 
-Antigravity (AGY): register the selected absolute path as a folder of an
-Antigravity project, then confirm that folder list. In the Antigravity app,
-use **New Project** (folder-with-plus) and **Add Folder**, or add the folder
-on an existing project's folder list. A project is the set of folders the
-agent may use. Antigravity CLI treats the directory where `agy` is started as
-the workspace root; check `agy --help` on the installed CLI before launching.
-`agy --new-project` creates a project for that session, and
-`agy --project=<project_id>` resumes an existing project by id; neither flag
-by itself adds a folder. `agy --add-dir "<absolute-path>"` and the in-session
-`/add-dir` command add another folder to the active workspace and do not
-replace the launch directory. The path must already exist on the running
-Antigravity host. Local/read-only plugin use still does not require `gh`;
-choosing this source/fork initialization runs the GitHub sign-in step above.
+```bash
+uv run https://github.com/mindie-agent/mindie-agent/releases/latest/download/install.py --host agy
+```
 
-Use available native tools or UI automation to complete the action. If the agent
-cannot operate the required folder picker, give the selected path and that one
-remaining action, and report registration as pending. Never edit private harness
-project databases or create a second client profile to simulate registration.
-Do not write Antigravity project state under `~/.gemini` to pretend a folder
-was registered.
+The installer stages the plugin, bootstraps the `mindie-harness v0.1.3` seed, and initializes the default profile. `gh` is optional and never a gate. The installer never mutates the host `~/.gemini`.
 
-Suggested combined offer (use the user's language):
+## 2. Three dynamic `ask_question` questions
 
-“是否创建并初始化 vllm-ascend-workspace，同时添加到当前客户端工作区？也可以使用已有目录，或继续当前目录。”
+After the install, call Antigravity's native **`ask_question`** tool (`is_multi_select: false`, first option prefixed `(Recommended)`; if unavailable, print a numbered card) once, in the user's language:
+
+1. **Workspace**
+   - `(Recommended) Use the current directory`
+   - `Specify an existing workspace directory`
+2. **Community sharing** — recommended option is dynamic:
+   - If `gh api --hostname github.com user --jq .login` succeeds within 3s: `(Recommended) Enable community sharing & fault reporting (contribute)` vs `Local-only (local-only)`.
+   - Otherwise: `(Recommended) Local-only (local-only)` vs `Enable community sharing (contribute)`.
+   - Reuse [GitHub Sign-In](github-authentication.md) only when the user chooses community contribution.
+3. **Remote NPU**
+   - `(Recommended) Connect a remote NPU now`
+   - `Later`
+   - On "now", perform one-step `remote_auth(host, port, user, password_env, save_default=True, discover=True)`. In terminal mode, prompt for `--password` **at the very end**; the password belongs only in the process environment or the credential store, never chat or a repository.
+
+## 3. Persist the choice
+
+```bash
+# contribute
+python3 plugins/mindie-agent/scripts/setup.py sharing --enable --project-root "$WORKSPACE_ROOT"
+# local-only
+python3 plugins/mindie-agent/scripts/setup.py sharing --local-only --project-root "$WORKSPACE_ROOT"
+# disable later
+python3 plugins/mindie-agent/scripts/setup.py sharing --disable
+```
+
+`setup.py sharing --status` is read-only.
+
+## 4. Readiness and Star
+
+Call `mindie_doctor` (optionally `{"probe_remote": true}`) for a bounded read-only local/runtime/SSH check. If it fails, report once and continue with native tooling; never block the install.
+
+Close with a single polite line: if the project helps, a GitHub Star ⭐ is appreciated at <https://github.com/mindie-agent/mindie-agent>.
