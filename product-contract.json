@@ -4,7 +4,7 @@
   "native_version": "0.1.22",
   "python_Range": ">=3.11,<3.15",
   "components": {
-    "mindie-harness": "0.1.7",
+    "mindie-harness": "0.1.8",
     "mindie-knowledge": "0.13.25",
     "remote-dev": "0.11.15",
     "mindie-diagnostics": "0.5.17",
