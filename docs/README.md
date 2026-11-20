@@ -15,4 +15,4 @@
 | [框架稳定性与持久化配置](framework-stability.zh.md) | [Framework Stability](framework-stability.md) | 被动默认静默保障、`mindie-harness` 薄委托、跨平台原子文件替换与配置隔离 |
 | [测试边界与契约校验](testing-contracts.zh.md) | [Test Boundaries & Contracts](testing-contracts.md) | Tier-0 契约测试矩阵、5 脚本行数门禁、`harness-compatibility.json` AST 映射校验与 LF 格式门禁 |
 | [工作区配置指南](install/workspace-setup.md) / [GitHub 认证](install/github-authentication.md) / [用户须知](install/user-notice.md) | [Workspace Setup](install/workspace-setup.md) / [GitHub Sign-In](install/github-authentication.md) / [User Notice](install/user-notice.md) | 一句话安装、3 问动态 onboarding、`gh` 可选认证与社区共享/脱敏数据边界说明 |
-| [Release v0.1.21 发布说明](releases/mindie-agent-agy-0.1.21.md) | [Release v0.1.21 Notes](releases/mindie-agent-agy-0.1.21.en.md) | `v0.1.21` 5 脚本薄插件、`mindie-harness v0.1.3` 种子握手、12 工具 `agy` remote-dev、`mindie_doctor` 与一句话安装 |
+| [Release v0.1.22 发布说明](releases/mindie-agent-agy-0.1.22.md) | [Release v0.1.22 Notes](releases/mindie-agent-agy-0.1.22.en.md) | `v0.1.22` 5 脚本薄插件、`mindie-harness v0.1.3` 种子握手、12 工具 `agy` remote-dev、`mindie_doctor` 与一句话安装 |

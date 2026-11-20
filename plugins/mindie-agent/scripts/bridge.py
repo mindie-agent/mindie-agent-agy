@@ -1,30 +1,20 @@
-"""Antigravity lifecycle hooks and knowledge RPC fallback (`SessionStart`, `PreInvocation`, `PreToolUse`, `Stop`).
-[Role]
-Implements the frozen `hooks.json` contracts and provides `rpc_knowledge` when
-`mindie_harness` reports `knowledge_unavailable` for an in-process checkout.
-[Invariants]
-- Stop returns `{}` and NEVER emits `"decision": "continue"`; an `inactive`
-  admission lease is never reactivated.
-- PreToolUse needs zero `_meta`; forged identity keys or malformed `session_id` deny.
-- Receipt Honesty: a successful RPC whose `Admission.finish` raises
-  `OSError` / `sqlite3.Error` keeps `isError=False` with `receipt_warning`.
-[Timeouts & Locks]
-- `capture_hook` is bounded to `6.0s`; knowledge RPC uses `35s` reads and `110s` sync/distill.
-[Side-Effect Policy]
-- Writes the state marker on SessionStart and captures only for an authorized
-  in-scope Stop. Never mutates the host Antigravity data directory.
+"""Antigravity lifecycle hooks (`SessionStart`, `PreInvocation`, `PreToolUse`, `Stop`).
+[Role] Implements the frozen `hooks.json` contracts and delegates authorized `Stop`
+transcript capture to `mindie_harness.runtime.knowledge_binding.run_stop_capture`.
+[Invariants] Stop returns `{}` in `< 30ms` when passive/disabled/out-of-scope with zero
+SQLite, NEVER emits `"decision": "continue"`, never reactivates a revoked lease, and uses
+`"identity_kind": "notification"` unless a native turn/execution ID is supplied.
+[Timeouts & Locks] `run_stop_capture` is bounded to `6.0s` around one monotonic deadline.
+[Side-Effect Policy] Writes `pending-update-check.json` on SessionStart; never touches `~/.gemini`.
 """
 from __future__ import annotations
 import json, os, re, sqlite3, sys
 from pathlib import Path
-from typing import Any
 from mindie_harness.api import ProfileRef
-from mindie_harness.mcp.receipts import apply_receipt_honesty
-from mindie_harness.mcp.router import RequestContext
 from mindie_harness.runtime.activation import write_pending_update_check
+from mindie_harness.runtime.knowledge_binding import run_stop_capture
 from mindie_harness.sharing import sharing_status
-from agy_transcript import capture_source
-MAX_HOOK_BYTES = 1024 * 1024
+PLUGIN_ROOT, MAX_HOOK_BYTES = Path(__file__).resolve().parent.parent, 1024 * 1024
 SESSION_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
 def _event(event: dict | None = None) -> dict:
     if event is not None:
@@ -37,7 +27,7 @@ def _event(event: dict | None = None) -> dict:
     if not isinstance(parsed, dict): raise ValueError("native hook payload must be a JSON object")
     return parsed
 def _profile(config: str | Path | None = None) -> ProfileRef:
-    return ProfileRef.resolve("agy", plugin_root=Path(__file__).resolve().parent.parent, config_path=config or os.environ.get("MINDIE_AGENT_CONFIG"))
+    return ProfileRef.resolve("agy", plugin_root=PLUGIN_ROOT, config_path=config or os.environ.get("MINDIE_AGENT_CONFIG"))
 def _session(event: dict) -> str | None:
     raw = event.get("conversationId") or event.get("conversation_id") or event.get("session_id")
     return raw.strip().lower() if isinstance(raw, str) and SESSION_RE.fullmatch(raw.strip()) else None
@@ -48,13 +38,27 @@ def _workspace(event: dict) -> str | None:
     return None
 def _transcript(event: dict, session: str) -> str | None:
     direct = event.get("transcriptPath") or event.get("transcript_path")
-    if isinstance(direct, str) and os.path.isabs(direct): return str(Path(direct))
+    if isinstance(direct, str) and os.path.isabs(direct):
+        candidate = Path(direct)
+        if candidate.name == "transcript.jsonl" and candidate.with_name("transcript_full.jsonl").is_file():
+            candidate = candidate.with_name("transcript_full.jsonl")
+        return str(candidate) if candidate.is_file() else None
     app_data = event.get("appDataDir") or event.get("app_data_dir") or os.environ.get("AGY_APP_DATA_DIR")
     if not isinstance(app_data, str) or not os.path.isabs(app_data): return None
     logs = Path(app_data) / "brain" / session / ".system_generated" / "logs"
     for name in ("transcript_full.jsonl", "transcript.jsonl"):
         if (logs / name).is_file(): return str(logs / name)
     return None
+def _clean_id(val: object) -> str | None:
+    return val.strip() if isinstance(val, str) and val.strip() and "\x00" not in val and len(val.strip()) <= 256 else None
+def _stop_identity(event: dict, session: str, transcript: str) -> dict[str, str]:
+    if turn := _clean_id(event.get("turnId") or event.get("turn_id")): return {"identity_kind": "turn", "turn_id": turn}
+    if exec_id := _clean_id(event.get("executionId") or event.get("execution_id")): return {"identity_kind": "turn", "turn_id": f"exec:{exec_id}"[:256]}
+    num = event.get("executionNum") if "executionNum" in event else event.get("execution_num")
+    if (type(num) is int and num >= 0) or _clean_id(num): return {"identity_kind": "turn", "turn_id": f"exec:{str(num).strip()}"[:256]}
+    if evt := _clean_id(event.get("eventId") or event.get("event_id")): return {"identity_kind": "notification", "event_id": evt}
+    stat = Path(transcript).stat()
+    return {"identity_kind": "notification", "event_id": f"{session}:eof:{stat.st_size}:{stat.st_mtime_ns}"[:256]}
 def _tool(event: dict) -> tuple[str, dict]:
     call = event.get("toolCall") or event.get("tool_call")
     if not isinstance(call, dict): return "", {}
@@ -66,71 +70,6 @@ def _tool(event: dict) -> tuple[str, dict]:
         inner = args.get("Arguments") or args.get("arguments")
         args = dict(inner) if isinstance(inner, dict) else args
     return name if isinstance(name, str) else "", args
-def _read_json(path: Path) -> dict:
-    try: raw = Path(path).read_bytes() if Path(path).is_file() else None
-    except TimeoutError: raise
-    except OSError: return {}
-    try: doc = json.loads(raw.decode("utf-8-sig")) if raw is not None else None
-    except (UnicodeDecodeError, ValueError): return {}
-    return doc if isinstance(doc, dict) else {}
-def _engine(profile: ProfileRef) -> Path:
-    raw = _read_json(profile.config_path).get("engine_config")
-    return Path(raw) if isinstance(raw, str) and os.path.isabs(raw) else profile.config_path.with_name(profile.config_path.stem + ".engine.json")
-def _error(reason: str, message: str) -> dict:
-    return {"content": [{"type": "text", "text": message}], "structuredContent": {"reason": reason, "message": message, "retryable": False}, "isError": True}
-def rpc_knowledge(ctx: RequestContext, arguments: dict, profile: ProfileRef) -> dict | None:
-    """Fallback RPC bridge to `mindie_knowledge.loop.transport` with Receipt Honesty."""
-    try:
-        from mindie_knowledge.loop import transport
-        from mindie_knowledge.loop.activation import Admission
-        from mindie_knowledge.loop.cli import ensure_service
-    except TimeoutError: raise
-    except Exception: return None
-    method, payload = ctx.tool_name.removeprefix("knowledge_"), dict(arguments or {})
-    payload["_session_id"] = ctx.session_id
-    admission, token = Admission(str(profile.admission_db)), None
-    try:
-        inspect_fn = getattr(admission, "inspect", None)
-        if callable(inspect_fn) and inspect_fn(ctx.session_id).get("status") == "inactive":
-            return _error("knowledge_inactive", "MindIE knowledge is explicitly deactivated for this session.")
-        lease = admission.active_lease(ctx.session_id)
-        if isinstance(lease, dict): token = lease.get("token")
-        if method == "distill" and not token:
-            scope = str((ctx.cwd or profile.plugin_root).resolve())
-            token = admission.activate(ctx.session_id, project_root=scope, root_session=ctx.session_id, not_before=0.0).get("token")
-    except TimeoutError: raise
-    except (OSError, sqlite3.Error, ValueError):
-        if method == "distill": return None
-    if method == "distill": payload.pop("_session_verified", None); payload["_activation"] = token
-    else: payload.pop("_activation", None); payload["_session_verified"] = True
-    try:
-        value = transport.rpc(ensure_service(str(_engine(profile))), method, payload, timeout=110.0 if method in {"sync", "distill"} else 35.0)
-        is_error = False
-        if method == "distill":
-            from mindie_knowledge.graded.distill import result_view
-            value, is_error = result_view(value)
-        result: dict[str, Any] = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, default=str)}],
-                                  "structuredContent": value if isinstance(value, dict) else {"feeds": value}, "isError": bool(is_error)}
-    except TimeoutError: raise
-    except Exception as exc: return _error("knowledge_rpc_failed", f"mindie_knowledge RPC failed ({type(exc).__name__}): {exc}")
-    if token:
-        try: admission.finish(ctx.session_id, token, not is_error)
-        except TimeoutError as exc:
-            if not is_error: result = apply_receipt_honesty(result, exc)
-        except Exception as exc:
-            if not is_error: result = apply_receipt_honesty(result, exc)
-    return result
-def _in_scope(candidate: str, roots: list) -> bool:
-    try: target = Path(candidate).expanduser().resolve()
-    except TimeoutError: raise
-    except (OSError, ValueError): return False
-    for root in roots:
-        if not isinstance(root, str) or not os.path.isabs(root): continue
-        try:
-            if target.is_relative_to(Path(root).expanduser().resolve()): return True
-        except TimeoutError: raise
-        except (OSError, ValueError): continue
-    return False
 def handle_session_start(event: dict | None = None, *, config: str | Path | None = None) -> dict:
     _ = _event(event)
     write_pending_update_check(_profile(config))
@@ -158,20 +97,10 @@ def handle_stop(event: dict | None = None, *, config: str | Path | None = None) 
     transcript = _transcript(event, session)
     if transcript is None: return {}
     try:
-        from mindie_knowledge.loop.activation import Admission
-        admission = Admission(str(profile.admission_db))
-        if admission.inspect(session).get("status") == "inactive": return {}
-        lease = admission.activate(session, project_root=workspace, root_session=session, not_before=0.0)
-        source = capture_source(transcript, session, binding=lease)
-        engine = _engine(profile)
-        if engine.is_file():
-            from mindie_knowledge.loop.handoff import prepare_schema
-            prepare_schema(str(engine))
-        forwarded = {"hook_event_name": "Stop", "identity_kind": "turn", "session_id": session,
-                     "turn_id": f"{session}:exec:{event.get('executionNum', 1)}:{event.get('terminationReason', 'NO_TOOL_CALL')}",
-                     "mindie_activation": lease.get("token"), "harness": "agy", "transcript_path": source["transcript_path"]}
-        from mindie_knowledge.loop.cli import capture_hook
-        capture_hook(str(engine), forwarded, timeout=6.0)
+        payload = {"hook_event_name": "Stop", "harness": "agy", "session_id": session, "cwd": workspace, "transcript_path": transcript, **_stop_identity(event, session, transcript)}
+        if "stop_hook_active" in event or "stopHookActive" in event:
+            payload["stop_hook_active"] = event["stop_hook_active"] if "stop_hook_active" in event else event["stopHookActive"]
+        run_stop_capture(profile, payload, plugin_root=PLUGIN_ROOT, timeout_sec=6.0)
     except TimeoutError: raise
     except (OSError, ImportError, sqlite3.Error, ValueError, RuntimeError) as exc:
         print(f"MindIE Stop capture skipped: {type(exc).__name__}: {exc}", file=sys.stderr)

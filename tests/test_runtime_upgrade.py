@@ -33,25 +33,33 @@ def test_setup_help_and_dry_run_are_read_only(tmp_path: Path, monkeypatch: pytes
 def test_setup_init_sharing_and_release_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import setup
 
-    monkeypatch.setenv("MINDIE_REDACTOR_EXECUTABLE", str(tmp_path / "bin" / "gitleaks"))
+    gitleaks_bin = tmp_path / "bin" / ("gitleaks.exe" if os.name == "nt" else "gitleaks")
+    gitleaks_bin.parent.mkdir(parents=True, exist_ok=True)
+    gitleaks_bin.write_bytes(b"stub")
+    monkeypatch.setenv("MINDIE_REDACTOR_EXECUTABLE", str(gitleaks_bin.resolve()))
     workspace = tmp_path / "ws"
+    workspace2 = tmp_path / "ws2"
     workspace.mkdir()
+    workspace2.mkdir()
     assert setup.main(["init", "--domain", "vllm-ascend"]) == 0
     adapter = json.loads(_config().read_text(encoding="utf-8"))
-    engine = json.loads(_config().with_name("agy.engine.json").read_text(encoding="utf-8"))
+    engine = json.loads(Path(adapter["engine_config"]).read_text(encoding="utf-8"))
     assert adapter["harness"] == "antigravity"
-    assert adapter["python"] == sys.executable
+    assert Path(adapter["python"]).resolve() == Path(sys.executable).resolve()
     assert adapter["runtime_scripts"] == str(SCRIPTS)
     assert adapter["source_root"] == str(PLUGIN)
     assert adapter["product_validation"]["status"] == "validated"
+    assert adapter["product_validation"]["native_version"] == "0.1.22"
+    assert len(adapter["domain_configs"]) == 9
     assert engine["transcript_adapter"] == str(SCRIPTS / "agy_transcript.py")
-    assert engine["redactor_executable"] == str(tmp_path / "bin" / "gitleaks")
+    assert Path(engine["redactor_executable"]).resolve() == gitleaks_bin.resolve()
 
     assert setup.main(["sharing", "--status"]) == 0
-    assert setup.main(["sharing", "--local-only", "--project-root", str(workspace)]) == 0
+    assert setup.main(["sharing", "--local-only", "--project-root", str(workspace), "--project-root", str(workspace2)]) == 0
     consent = json.loads((_config().parent / "mindie-consent.json").read_text(encoding="utf-8"))
     community = json.loads((_config().parent / "mindie-community.json").read_text(encoding="utf-8"))
     assert consent["choice"] == "local-only" and community["local_only"] is True
+    assert len(community["project_roots"]) == 2
     assert setup.main(["sharing", "--enable", "--project-root", str(workspace)]) == 0
     consent = json.loads((_config().parent / "mindie-consent.json").read_text(encoding="utf-8"))
     assert consent["choice"] == "contribute"
@@ -60,6 +68,7 @@ def test_setup_init_sharing_and_release_metadata(tmp_path: Path, monkeypatch: py
     assert json.loads((_config().parent / "mindie-consent.json").read_text(encoding="utf-8"))["choice"] == "disabled"
     assert json.loads((_config().parent / "mindie-community.json").read_text(encoding="utf-8"))["enabled"] is False
     assert setup.main(["release-metadata"]) == 0
+    assert setup.main(["release-metadata", "--source", str(ROOT), "--tests", "tests", "--revision", "a" * 40]) == 0
 
 
 def test_harness_generation_activation_and_native_rebinding(tmp_path: Path) -> None:
@@ -83,14 +92,14 @@ def test_harness_generation_activation_and_native_rebinding(tmp_path: Path) -> N
     assert adapter["component_release"] == str(generation)
     assert adapter["python"] == sys.executable
 
-    adapter["product_validation"] = {"native_version": "0.1.20"}
+    adapter["product_validation"] = {"native_version": "0.1.21"}
     adapter["runtime_scripts"] = str(tmp_path / "old-scripts")
     adapter["component_commands"] = {"profiler": [sys.executable, "-I", "-X", "utf8", "-m", "mindie_profiler"]}
     atomic_write_json(_config(), adapter)
-    rebound = rebind_native_plugin_if_needed(profile, native_version="0.1.21", runtime_scripts=SCRIPTS)
+    rebound = rebind_native_plugin_if_needed(profile, native_version="0.1.22", runtime_scripts=SCRIPTS)
     assert rebound["status"] == "rebound"
     updated = json.loads(_config().read_text(encoding="utf-8"))
-    assert updated["product_validation"]["native_version"] == "0.1.21"
+    assert updated["product_validation"]["native_version"] == "0.1.22"
     assert updated["runtime_scripts"] == str(SCRIPTS)
     assert updated["source_root"] == str(PLUGIN)
     assert updated["component_commands"]["profiler"] == [sys.executable, "-I", "-X", "utf8", "-m", "mindie_profiler"]

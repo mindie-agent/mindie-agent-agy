@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/mindie-agent/mindie-agent-agy/releases"><img src="https://img.shields.io/badge/release-v0.1.21-0F766E.svg" alt="Release v0.1.21"></a>
+  <a href="https://github.com/mindie-agent/mindie-agent-agy/releases"><img src="https://img.shields.io/badge/release-v0.1.22-0F766E.svg" alt="Release v0.1.22"></a>
   <a href="harness-compatibility.json"><img src="https://img.shields.io/badge/Antigravity-2.0.0_%E2%80%93_2.99.99-4285F4.svg" alt="Antigravity 2.0.0 - 2.99.99"></a>
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.13-3776AB.svg" alt="Python 3.13"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-0F766E.svg" alt="License: MIT"></a>
@@ -27,7 +27,7 @@
 
 ---
 
-**MindIE Agent for Google Antigravity** (`mindie-agent-agy`) is the native Google Antigravity (`agy`) plugin for [MindIE Agent](https://github.com/mindie-agent/mindie-agent). `v0.1.21` is the **Great Subtraction + UX** release: the plugin is now **5 thin scripts** delegating to `mindie-harness` (`v0.1.3` seed) and the shared components; `mindie-remote-dev` uses Antigravity's native **12-tool `agy` profile**, `mindie-tools` adds the read-only **`mindie_doctor`** readiness check, and installation is a single **one-liner**. `gh` is an optional enhancement, **never a blocker**.
+**MindIE Agent for Google Antigravity** (`mindie-agent-agy`) is the native Google Antigravity (`agy`) plugin for [MindIE Agent](https://github.com/mindie-agent/mindie-agent). `v0.1.22` is the **Great Subtraction + UX** release: the plugin is now **5 thin scripts** delegating to `mindie-harness` (`v0.1.3` seed) and the shared components; `mindie-remote-dev` uses Antigravity's native **12-tool `agy` profile**, `mindie-tools` adds the read-only **`mindie_doctor`** readiness check, and installation is a single **one-liner**. `gh` is an optional enhancement, **never a blocker**.
 
 The design follows the [MindIE Agent engineering principles](https://github.com/mindie-agent/mindie-agent/blob/main/docs/design-principles.md): every core capability is silently available while the plugin is enabled, no `/` slash command is exposed (`disable-slash-command: true`), and there is no silent degradation or blind retry.
 
@@ -120,7 +120,7 @@ uv run https://github.com/mindie-agent/mindie-agent/releases/latest/download/ins
 
 ## Architecture and component boundaries
 
-`mindie-agent-agy v0.1.21` is a **thin adapter**: this repository keeps only 5 production scripts (`mindie_launch.py`, `bridge.py`, `mcp_server.py`, `agy_transcript.py`, `setup.py`). Lifecycle, runtime generations, the MCP gateway, sharing consent, and knowledge RPC are delegated to `mindie-harness` and the shared components.
+`mindie-agent-agy v0.1.22` is a **thin adapter**: this repository keeps only 5 production scripts (`mindie_launch.py`, `bridge.py`, `mcp_server.py`, `agy_transcript.py`, `setup.py`). Lifecycle, runtime generations, the MCP gateway, sharing consent, and knowledge RPC are delegated to `mindie-harness` and the shared components.
 
 ```mermaid
 flowchart LR

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/mindie-agent/mindie-agent-agy/releases"><img src="https://img.shields.io/badge/release-v0.1.21-0F766E.svg" alt="Release v0.1.21"></a>
+  <a href="https://github.com/mindie-agent/mindie-agent-agy/releases"><img src="https://img.shields.io/badge/release-v0.1.22-0F766E.svg" alt="Release v0.1.22"></a>
   <a href="harness-compatibility.json"><img src="https://img.shields.io/badge/Antigravity-2.0.0_%E2%80%93_2.99.99-4285F4.svg" alt="Antigravity 2.0.0 - 2.99.99"></a>
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.13-3776AB.svg" alt="Python 3.13"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-0F766E.svg" alt="License: MIT"></a>
@@ -27,7 +27,7 @@
 
 ---
 
-**MindIE Agent for Google Antigravity**（`mindie-agent-agy`）是 [MindIE Agent](https://github.com/mindie-agent/mindie-agent) 面向 Google Antigravity（`agy`）的原生插件。`v0.1.21` 是**大减法（Great Subtraction）+ UX 升级**版本：插件收敛为 **5 个薄脚本**，全面委托 `mindie-harness`（`v0.1.3` 种子包）与共享组件；`mindie-remote-dev` 直接启用 Antigravity 原生 **12 工具 `agy` Profile**，`mindie-tools` 新增 **`mindie_doctor`** 只读就绪检查；安装收敛为**一句话 one-liner**，`gh` 仅作可选增强，**绝不阻塞**。
+**MindIE Agent for Google Antigravity**（`mindie-agent-agy`）是 [MindIE Agent](https://github.com/mindie-agent/mindie-agent) 面向 Google Antigravity（`agy`）的原生插件。`v0.1.22` 是**大减法（Great Subtraction）+ UX 升级**版本：插件收敛为 **5 个薄脚本**，全面委托 `mindie-harness`（`v0.1.3` 种子包）与共享组件；`mindie-remote-dev` 直接启用 Antigravity 原生 **12 工具 `agy` Profile**，`mindie-tools` 新增 **`mindie_doctor`** 只读就绪检查；安装收敛为**一句话 one-liner**，`gh` 仅作可选增强，**绝不阻塞**。
 
 项目设计严格遵循 [MindIE Agent 工程设计原则](https://github.com/mindie-agent/mindie-agent/blob/main/docs/design-principles.md)：插件启用后全部核心能力默认静默可用，不暴露 `/` 斜杠命令（`SKILL.md` 启用 `disable-slash-command: true`），不做静默降级或盲目重试。
 
@@ -120,7 +120,7 @@ uv run https://github.com/mindie-agent/mindie-agent/releases/latest/download/ins
 
 ## 架构与组件边界
 
-`mindie-agent-agy v0.1.21` 是**薄适配层（Thin Adapter）**：本仓库仅保留 5 个生产脚本（`mindie_launch.py`、`bridge.py`、`mcp_server.py`、`agy_transcript.py`、`setup.py`），生命周期、运行时代际、MCP 网关、共享授权与知识 RPC 全部委托 `mindie-harness` 与共享组件。
+`mindie-agent-agy v0.1.22` 是**薄适配层（Thin Adapter）**：本仓库仅保留 5 个生产脚本（`mindie_launch.py`、`bridge.py`、`mcp_server.py`、`agy_transcript.py`、`setup.py`），生命周期、运行时代际、MCP 网关、共享授权与知识 RPC 全部委托 `mindie-harness` 与共享组件。
 
 ```mermaid
 flowchart LR

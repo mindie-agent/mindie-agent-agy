@@ -1,31 +1,19 @@
 """Pure-stdlib entrypoint for Antigravity hooks, MCP, setup, update, and doctor.
-[Role]
-Dispatches `hook session-start|pre-invocation|pre-tool-use|stop`, `mcp remote|
-tools`, and `setup`/`update`/`doctor`/`sharing`. Hooks are fast-pathed in pure
-stdlib before `bridge` loads; cold launches use the verified seed bundle.
-[Invariants]
-- Zero third-party imports at import time; hook fast-paths never import
-  `mindie_harness`, open SQLite, or read a transcript.
-- `hook stop` NEVER emits `"decision": "continue"`; unconfigured, disabled, or
-  out-of-scope calls emit `{}`.
-- The seed is streamed in 64 KiB chunks against `mindie-harness-seed/1`.
-- SessionStart's sibling temp file is always removed in `finally`.
-[Timeouts & Locks]
-- Hook re-exec `15s`; cold provisioning `300s`; resident MCP is unbounded.
-[Side-Effect Policy]
-- Writes only `state/agy/pending-update-check.json`; never mutates the host Antigravity data directory.
+[Role] Dispatches `hook`, `mcp remote|tools`, and `setup`/`update`/`doctor`/`sharing`
+with pure-stdlib hook fast-paths and verified `mindie-harness-seed.pyz` cold handoff.
+[Invariants] Zero third-party imports at import time; `hook stop` NEVER emits
+`"decision": "continue"`; rejects `WindowsApps` 0-byte Python stubs; streams seed
+in 64 KiB chunks; removes SessionStart sibling temp file in `finally`.
+[Timeouts & Locks] Hook re-exec `15s`; cold seed `300s` (`stdin=DEVNULL`); MCP unbounded.
+[Side-Effect Policy] Writes only `state/agy/pending-update-check.json`; never touches `~/.gemini`.
 """
 from __future__ import annotations
-import hashlib, importlib.util, io, json, os
+import hashlib, importlib.util, io, json, os, subprocess, sys, tempfile, time
 from pathlib import Path
-import subprocess, sys, tempfile, time
 CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path: sys.path.insert(0, str(SCRIPTS_DIR))
-PLUGIN_ROOT = SCRIPTS_DIR.parent
-MAX_HOOK_BYTES = 1024 * 1024
-HOOK_TIMEOUT = 15.0
-SEED_TIMEOUT = 300.0
+PLUGIN_ROOT, MAX_HOOK_BYTES, HOOK_TIMEOUT, SEED_TIMEOUT = SCRIPTS_DIR.parent, 1024 * 1024, 15.0, 300.0
 def _home(config: bool) -> Path:
     raw = os.environ.get("MINDIE_CONFIG_HOME" if config else "MINDIE_DATA_HOME")
     if raw: return Path(raw).expanduser()
@@ -67,27 +55,36 @@ def verify_seed_bundle(plugin_dir: str | Path | None = None) -> dict:
     except OSError as exc: raise ValueError(f"Seed archive is unreadable: {pyz}") from exc
     if total != size or digest.hexdigest() != sha: raise ValueError(f"Seed integrity mismatch for {pyz}")
     return lock
-def _cli_cfg(argv: list[str]) -> Path:
+def _explicit_cfg(argv: list[str]) -> Path | None:
     for idx, tok in enumerate(argv):
         if tok == "--config" and idx + 1 < len(argv) and not argv[idx + 1].startswith("-"): return Path(argv[idx + 1]).expanduser()
         if tok.startswith("--config="): return Path(tok.split("=", 1)[1]).expanduser()
-    return cfg_path()
+    return None
+def _cli_cfg(argv: list[str]) -> Path:
+    return _explicit_cfg(argv) or cfg_path()
 def _readonly_cli(role: str, argv: list[str]) -> bool:
     if any(tok in {"-h", "--help"} or tok.startswith("--help=") or (tok.startswith("--dry") and "--dry-run".startswith(tok)) for tok in argv): return True
+    if argv[:2] == ["setup", "release-metadata"]: return True
     return (role == "sharing" or argv[:2] == ["setup", "sharing"]) and ("--status" in argv or not any(f in argv for f in ("--enable", "--local-only", "--disable")))
+def _usable_py(raw: object) -> str | None:
+    if not isinstance(raw, str) or not raw.strip() or "\\microsoft\\windowsapps\\" in raw.replace("/", "\\").lower(): return None
+    cand = Path(raw).expanduser()
+    try: st = cand.stat()
+    except TimeoutError: raise
+    except OSError: return None
+    return str(_norm(cand)) if cand.is_file() and (os.name != "nt" or st.st_size > 0) else None
 def _active_python(target_cfg: Path | None = None) -> str | None:
     cfg = _read_json(target_cfg or cfg_path()) or {}
-    raw = cfg.get("python")
-    if isinstance(raw, str) and Path(raw).expanduser().is_file(): return str(_norm(raw))
+    if py := _usable_py(cfg.get("python")): return py
     release = cfg.get("component_release")
     if isinstance(release, str) and release:
         base = Path(release).expanduser()
         receipt = _read_json(base / "runtime.json" if base.is_dir() else base) or {}
-        validation, found = receipt.get("validation"), receipt.get("python")
-        if isinstance(validation, dict) and validation.get("status") == "validated" and isinstance(found, str) and Path(found).is_file(): return str(_norm(found))
+        validation = receipt.get("validation")
+        if isinstance(validation, dict) and validation.get("status") == "validated" and (py := _usable_py(receipt.get("python"))): return py
     try: importable = importlib.util.find_spec("mindie_harness") is not None
     except (ImportError, AttributeError, ValueError): importable = False
-    return sys.executable if importable else None
+    return sys.executable if importable and _usable_py(sys.executable) else None
 def _emit(payload: dict) -> None:
     sys.stdout.buffer.write((json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")); sys.stdout.buffer.flush()
 def _read_hook() -> tuple[dict, bytes]:
@@ -178,7 +175,7 @@ def _provision(argv: list[str]) -> int:
     parent = PLUGIN_ROOT.parents[1]
     provision_root = parent if (parent / "pyproject.toml").is_file() else PLUGIN_ROOT
     try:
-        proc = subprocess.run([sys.executable, str(PLUGIN_ROOT / "assets/mindie-harness-seed.pyz"), "--host", "agy", "--plugin-root", str(provision_root), "--config", str(target_cfg)], capture_output=True, text=True, timeout=SEED_TIMEOUT, creationflags=CREATE_NO_WINDOW)
+        proc = subprocess.run([sys.executable, str(PLUGIN_ROOT / "assets/mindie-harness-seed.pyz"), "--host", "agy", "--plugin-root", str(provision_root), "--config", str(target_cfg)], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=SEED_TIMEOUT, creationflags=CREATE_NO_WINDOW)
     except subprocess.TimeoutExpired:
         print("MindIE cold provisioning exceeded its time budget", file=sys.stderr); return 1
     except TimeoutError: raise
@@ -189,8 +186,8 @@ def _provision(argv: list[str]) -> int:
     lines = (proc.stdout or "").strip().splitlines()
     try: payload = json.loads(lines[-1]) if lines else {}
     except ValueError: payload = {}
-    python = payload.get("python") if isinstance(payload, dict) else None
-    if not isinstance(python, str) or not Path(python).is_file(): python = _active_python(target_cfg)
+    python = _usable_py(payload.get("python")) if isinstance(payload, dict) else None
+    if python is None: python = _active_python(target_cfg)
     if python is None:
         print("MindIE cold provisioning reported no interpreter", file=sys.stderr); return 1
     return _reexec(python, argv)
@@ -209,8 +206,8 @@ def main(argv: list[str] | None = None) -> int:
             if op == "session-start": _read_hook(); _write_pending(); _emit({}); return 0
             if op == "stop":
                 event, raw = _read_hook()
-                if _passive_stop(event): _emit({}); return 0
-                python = _active_python()
+                if event.get("stop_hook_active", event.get("stopHookActive", False)) is not False or _passive_stop(event): _emit({}); return 0
+                python = _active_python(_cli_cfg(rest))
                 if python is not None and _norm(python) != _norm(sys.executable): return _reexec(python, ["hook", "stop"], raw)
                 return _bridge(["stop"], raw)
         except TimeoutError: raise
@@ -223,10 +220,11 @@ def main(argv: list[str] | None = None) -> int:
         return _provision(argv)
     if python is not None and _norm(python) != _norm(sys.executable): return _reexec(python, argv)
     if role == "mcp":
-        if rest and rest[0] not in {"remote", "tools"}:
-            print(f"unsupported MCP surface: {rest[0]}", file=sys.stderr); return 2
+        pos = [rest[i] for i in range(len(rest)) if not rest[i].startswith("-") and (i == 0 or rest[i - 1] != "--config")]
+        if pos and pos[0] not in {"remote", "tools"}:
+            print(f"unsupported MCP surface: {pos[0]}", file=sys.stderr); return 2
         import mcp_server
-        return mcp_server.main(rest)
+        return mcp_server.serve(pos[0] if pos else "tools", config=_explicit_cfg(argv))
     if role in {"setup", "update", "doctor", "sharing"}:
         import setup
         return setup.main(argv if role == "setup" else [role, *rest])
