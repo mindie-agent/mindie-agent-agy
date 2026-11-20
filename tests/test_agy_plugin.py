@@ -52,7 +52,7 @@ def test_plugin_manifest_and_root_hooks_layout() -> None:
     assert manifest["version"] == "0.1.22"
     contract = _load(ROOT / "product-contract.json")
     assert contract["native_version"] == "0.1.22"
-    assert contract["components"]["mindie-harness"] == "0.1.5"
+    assert contract["components"]["mindie-harness"] == "0.1.6"
     assert contract["components"]["mindie-debugger"] == "0.1.4"
     assert contract["components"]["npu-top"] == "0.3.5"
     assert len(contract["components"]) == 9
@@ -76,7 +76,7 @@ def test_seed_bundle_verifies_and_rejects_tampering(tmp_path: Path) -> None:
 
     lock = mindie_launch.verify_seed_bundle(PLUGIN)
     assert lock["schema"] == "mindie-harness-seed/1"
-    assert lock["version"] == "0.1.4"
+    assert lock["version"] == "0.1.6"
     copied = tmp_path / "plugin"
     shutil.copytree(PLUGIN / "assets", copied / "assets")
     pyz = copied / "assets" / "mindie-harness-seed.pyz"
