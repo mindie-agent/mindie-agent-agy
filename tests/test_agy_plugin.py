@@ -49,9 +49,14 @@ def test_plugin_manifest_and_root_hooks_layout() -> None:
     assert not (PLUGIN / "hooks" / "hooks.json").exists()
     manifest = _load(PLUGIN / "plugin.json")
     assert manifest["name"] == "mindie-agent"
-    assert manifest["version"] == "0.1.21"
-    assert _load(ROOT / "product-contract.json")["native_version"] == "0.1.21"
-    assert 'version = "0.1.21"' in (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert manifest["version"] == "0.1.22"
+    contract = _load(ROOT / "product-contract.json")
+    assert contract["native_version"] == "0.1.22"
+    assert contract["components"]["mindie-harness"] == "0.1.5"
+    assert contract["components"]["mindie-debugger"] == "0.1.4"
+    assert contract["components"]["npu-top"] == "0.3.5"
+    assert len(contract["components"]) == 9
+    assert 'version = "0.1.22"' in (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert (PLUGIN / "runtime-requirements.txt").is_file()
     assert len((PLUGIN / "runtime-requirements.txt").read_text(encoding="utf-8").splitlines()) == 10
 
@@ -108,9 +113,13 @@ def test_thin_script_invariants() -> None:
             header = "\n".join(text.splitlines()[:30])
             assert all(section in header for section in required), path
             assert len(text.splitlines()) < 800, path
-    assert total <= 1050, total
+    assert total < 800, total
+    assert len((SCRIPTS / "mcp_server.py").read_text(encoding="utf-8").splitlines()) < 50
     for path in scripts:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        source_text = path.read_text(encoding="utf-8")
+        assert "rpc_knowledge" not in source_text, path
+        assert "knowledge_unavailable" not in source_text, path
+        tree = ast.parse(source_text, filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, (ast.Call,)) and isinstance(node.func, ast.Attribute) and node.func.attr in {"run", "Popen"}:
                 assert any(keyword.arg == "creationflags" for keyword in node.keywords), (path, node.lineno)

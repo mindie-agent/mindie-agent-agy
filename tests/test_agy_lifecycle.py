@@ -47,7 +47,21 @@ def _configure(profile, tier: str, root: Path) -> None:
     from mindie_harness.atomic import atomic_write_json
     from mindie_harness.sharing import configure_sharing
 
-    atomic_write_json(profile.config_path, {"engine_config": str(root / "missing.engine.json")})
+    engine_path = profile.config_path.with_name("agy.engine.json")
+    atomic_write_json(
+        engine_path,
+        {
+            "schema": "mindie-engine-config/1",
+            "harness": "agy",
+            "domain": "vllm-ascend",
+            "root": str(Path(profile.data_dir) / "knowledge"),
+            "admission_path": str(profile.admission_db),
+            "community_config": str(profile.config_path.parent / "mindie-community.json"),
+            "transcript_adapter": str(PLUGIN / "scripts" / "agy_transcript.py"),
+            "redactor_executable": str(Path(profile.data_dir) / "bin" / ("gitleaks.exe" if os.name == "nt" else "gitleaks")),
+        },
+    )
+    atomic_write_json(profile.config_path, {"engine_config": str(engine_path)})
     configure_sharing(profile, choice=tier, project_roots=[str(root)])
 
 
@@ -113,15 +127,16 @@ def test_cold_disabled_and_out_of_scope_stop_is_fast_and_creates_zero_sqlite(tmp
 
 def test_stop_never_forces_continuation_and_captures_only_in_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import bridge
+    from mindie_knowledge.loop.activation import Admission
+    import mindie_knowledge.loop.handoff as handoff
 
     workspace = tmp_path / "ws"
     workspace.mkdir()
     _write_transcript(workspace)
     profile = _profile()
     seen: list[dict] = []
-    import mindie_knowledge.loop.cli as cli
 
-    monkeypatch.setattr(cli, "capture_hook", lambda path, forwarded, timeout=None: seen.append(dict(forwarded)))
+    monkeypatch.setattr(handoff, "accept_stop", lambda path, forwarded, **kwargs: (seen.append(dict(forwarded)), {"stage": "accepted-local"})[1])
     payload = {"conversationId": SESSION, "workspacePaths": [str(workspace)], "appDataDir": str(workspace)}
     for tier in ("local-only", "contribute"):
         _configure(profile, tier, workspace)
@@ -131,13 +146,65 @@ def test_stop_never_forces_continuation_and_captures_only_in_scope(tmp_path: Pat
         assert len(seen) == (1 if tier == "local-only" else 2)
         assert seen[-1]["harness"] == "agy"
         assert seen[-1]["session_id"] == SESSION
+        assert seen[-1]["identity_kind"] == "notification"
+        assert "turn_id" not in seen[-1]
+        assert seen[-1]["event_id"].startswith(f"{SESSION}:eof:")
         assert seen[-1]["transcript_path"].endswith("transcript_full.jsonl")
-        assert seen[-1]["mindie_activation"]
+        assert Admission(str(profile.admission_db)).inspect(SESSION)["enabled"]
+
+
+def test_stop_uses_turn_identity_only_when_native_turn_id_present(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import bridge
+    import mindie_knowledge.loop.handoff as handoff
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _write_transcript(workspace)
+    profile = _profile()
+    _configure(profile, "local-only", workspace)
+    seen: list[dict] = []
+    monkeypatch.setattr(handoff, "accept_stop", lambda path, forwarded, **kwargs: (seen.append(dict(forwarded)), {"stage": "accepted-local"})[1])
+
+    assert bridge.handle_stop({"conversationId": SESSION, "workspacePaths": [str(workspace)], "appDataDir": str(workspace), "executionNum": 4, "terminationReason": "NO_TOOL_CALL"}) == {}
+    assert len(seen) == 1
+    assert seen[-1]["identity_kind"] == "turn"
+    assert seen[-1]["turn_id"] == "exec:4"
+    assert "event_id" not in seen[-1]
+
+    forwarded_stop: list[dict] = []
+    import mindie_harness.runtime.knowledge_binding as kb
+
+    monkeypatch.setattr(kb, "run_stop_capture", lambda prof, ev, **kw: (forwarded_stop.append(dict(ev)), {"stage": "inert", "reason": "recursive-stop"})[1])
+    monkeypatch.setattr(bridge, "run_stop_capture", kb.run_stop_capture)
+    assert bridge.handle_stop({"conversationId": SESSION, "workspacePaths": [str(workspace)], "appDataDir": str(workspace), "stop_hook_active": True}) == {}
+    assert len(forwarded_stop) == 1
+    assert forwarded_stop[0]["stop_hook_active"] is True
+
+
+def test_windows_apps_stub_rejection_and_mcp_config_forwarding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import mcp_server
+    import mindie_launch
+    from mindie_harness.atomic import atomic_write_json
+
+    fake_stub = tmp_path / "Microsoft" / "WindowsApps" / "python.exe"
+    fake_stub.parent.mkdir(parents=True)
+    fake_stub.write_bytes(b"")
+    assert mindie_launch._usable_py(str(fake_stub)) is None
+    assert mcp_server._usable_py(str(fake_stub)) is False
+
+    custom_cfg = tmp_path / "custom" / "agy.json"
+    atomic_write_json(custom_cfg, {"python": str(fake_stub)})
+    captured: list[tuple[str, str]] = []
+    monkeypatch.setattr(mindie_launch, "_active_python", lambda cfg=None: sys.executable)
+    monkeypatch.setattr(mcp_server, "serve_mcp", lambda surface, *, profile, adapter, managed=True: (captured.append((surface, str(profile.config_path))), 0)[1])
+    assert mindie_launch.main(["mcp", "remote", "--config", str(custom_cfg)]) == 0
+    assert captured == [("remote", str(custom_cfg))]
 
 
 def test_stop_preserves_explicit_revocation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import bridge
     from mindie_knowledge.loop.activation import Admission
+    import mindie_knowledge.loop.handoff as handoff
 
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -147,9 +214,8 @@ def test_stop_preserves_explicit_revocation(tmp_path: Path, monkeypatch: pytest.
     Admission(str(profile.admission_db)).activate(SESSION, project_root=str(workspace), root_session=SESSION, not_before=0.0)
     assert Admission(str(profile.admission_db)).deactivate(SESSION) is True
     seen: list[dict] = []
-    import mindie_knowledge.loop.cli as cli
 
-    monkeypatch.setattr(cli, "capture_hook", lambda *args, **kwargs: seen.append({"args": args}))
+    monkeypatch.setattr(handoff, "accept_stop", lambda *args, **kwargs: (seen.append({"args": args}), {"stage": "accepted-local"})[1])
     assert bridge.handle_stop({"conversationId": SESSION, "workspacePaths": [str(workspace)], "appDataDir": str(workspace)}) == {}
     assert seen == []
     assert Admission(str(profile.admission_db)).inspect(SESSION)["status"] == "inactive"
